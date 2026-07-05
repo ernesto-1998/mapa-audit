@@ -1,0 +1,120 @@
+# ─────────────────────────────────────────────
+# Dependencies
+# ─────────────────────────────────────────────
+node_modules/
+.pnp
+.pnp.js
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# ─────────────────────────────────────────────
+# Build output / compiled TypeScript
+# ─────────────────────────────────────────────
+dist/
+build/
+out/
+*.tsbuildinfo
+.tsbuildinfo
+
+# ─────────────────────────────────────────────
+# Environment & secrets  (NEVER commit real env files)
+# ─────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.local
+
+# ─────────────────────────────────────────────
+# Logs
+# ─────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ─────────────────────────────────────────────
+# Testing / coverage
+# ─────────────────────────────────────────────
+coverage/
+*.lcov
+.nyc_output/
+
+# ─────────────────────────────────────────────
+# Caches (build tools, linters, monorepo)
+# ─────────────────────────────────────────────
+.cache/
+.turbo/
+.eslintcache
+.parcel-cache/
+.npm/
+
+# ─────────────────────────────────────────────
+# Docker  (local runtime data — never commit volume contents)
+# ─────────────────────────────────────────────
+# Keep docker-compose.yml / Dockerfile tracked; ignore local data dirs if used.
+docker-data/
+*.pid
+
+# ─────────────────────────────────────────────
+# Terraform
+# ─────────────────────────────────────────────
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# ─────────────────────────────────────────────
+# IDE / editor
+# ─────────────────────────────────────────────
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ─────────────────────────────────────────────
+# OS-generated files  (Windows + macOS + Linux)
+# ─────────────────────────────────────────────
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+# Linux
+.directory
+.Trash-*
+.nfs*
+
+# ─────────────────────────────────────────────
+# Misc
+# ─────────────────────────────────────────────
+tmp/
+temp/
+.temp/
+*.tgz

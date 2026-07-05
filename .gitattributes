@@ -1,0 +1,91 @@
+# ─────────────────────────────────────────────
+# Line-ending normalization  (Windows <-> Linux/WSL)
+#
+# The core rule: Git stores everything with LF internally, and checks out
+# with the platform's native ending only where it matters. This prevents the
+# "entire file shows as changed" noise when switching between Windows and WSL.
+# ─────────────────────────────────────────────
+
+# Default: let Git auto-detect text files and normalize them to LF in the repo.
+* text=auto eol=lf
+
+# ─────────────────────────────────────────────
+# Explicitly LF  (these MUST be LF or they break on Linux/in containers)
+# ─────────────────────────────────────────────
+*.ts     text eol=lf
+*.tsx    text eol=lf
+*.js     text eol=lf
+*.jsx    text eol=lf
+*.mjs    text eol=lf
+*.cjs    text eol=lf
+*.json   text eol=lf
+*.jsonc  text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.md     text eol=lf
+*.html   text eol=lf
+*.css    text eol=lf
+*.scss   text eol=lf
+*.sql    text eol=lf
+*.env    text eol=lf
+*.toml   text eol=lf
+*.tf     text eol=lf
+*.tfvars text eol=lf
+
+# Shell scripts — MUST be LF, or they fail to execute in Linux/WSL/containers
+*.sh     text eol=lf
+*.bash   text eol=lf
+
+# Dotfiles / config without extensions that run in Linux
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+.dockerignore   text eol=lf
+.editorconfig   text eol=lf
+.npmrc          text eol=lf
+.nvmrc          text eol=lf
+Dockerfile      text eol=lf
+Dockerfile.*    text eol=lf
+Makefile        text eol=lf
+*.mk            text eol=lf
+
+# ─────────────────────────────────────────────
+# Windows-specific scripts  (keep CRLF so they work on Windows)
+# ─────────────────────────────────────────────
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+*.ps1    text eol=crlf
+
+# ─────────────────────────────────────────────
+# Binary files  (never touch line endings; never try to diff/merge)
+# ─────────────────────────────────────────────
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.webp   binary
+*.svg    binary
+*.pdf    binary
+*.zip    binary
+*.gz     binary
+*.tgz    binary
+*.tar    binary
+*.woff   binary
+*.woff2  binary
+*.ttf    binary
+*.eot    binary
+*.node   binary
+*.wasm   binary
+
+# ─────────────────────────────────────────────
+# Lockfiles — treat as text (LF) but mark to reduce noisy diffs
+# ─────────────────────────────────────────────
+package-lock.json  text eol=lf -diff
+pnpm-lock.yaml     text eol=lf -diff
+yarn.lock          text eol=lf -diff
+
+# ─────────────────────────────────────────────
+# GitHub linguist / stats — mark generated files (optional, cosmetic)
+# ─────────────────────────────────────────────
+dist/**       linguist-generated
+*.min.js      linguist-generated
