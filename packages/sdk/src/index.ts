@@ -12,8 +12,5 @@ export type {
   Environment,
   EventOutcome,
   EventSeverity,
-  EventType,
-  JsonObject,
-  JsonPrimitive,
-  JsonValue
+  EventType
 } from '@tnet06/mapa-audit-types';

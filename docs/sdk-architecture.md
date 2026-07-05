@@ -1,294 +1,486 @@
 # Audit & Business Observability Platform
-## SDK Architecture Document (v2)
+## SDK Architecture Document (Final)
 
 **Status:** Draft for review
 **Audience:** Engineering
-**Companion to:** Platform Design Overview, Database Design (v2)
+**Companion to:** Platform Design Overview, Database Design (TimescaleDB)
 
 ---
 
 ### 1. Purpose
 
-This document describes the SDK that backend services use to emit audit, business, error, and security events to the platform. The SDK is the **only** component application developers interact with directly — it hides RabbitMQ, correlation propagation, and event formatting behind a small, stable public API.
+This document describes the SDK that backend services use to record audit,
+business, error, and security events. The SDK's core value is **automatic,
+framework-aware capture of request context** (correlation ID, user, endpoint, IP,
+etc.) plus a **structured business-audit event model** — not log transport, which
+is a solved problem.
+
+Where events go is a **pluggable transport**: console, file, or (later) a queue
+feeding a persistence pipeline. The SDK does not compete with general-purpose
+loggers (Pino, Winston) on transport; it focuses on what they don't do — turning
+raw requests into structured, correlated, business-meaningful audit events.
 
 Design priorities:
 
-- A minimal, stable public surface (two functions cover ~95% of usage).
-- Framework independence at the core, with thin adapters per framework.
-- Zero business logic — the SDK captures context and publishes; it never decides what an event *means*.
-- Safe failure behavior — a broken pipeline must never take down or slow the host application.
-- Client-generated event identity, so the platform can guarantee idempotency downstream.
+- A minimal, stable public surface.
+- **Two independent axes:** adapters (capture, per framework) and transports
+  (delivery, per destination) — neither knows about the other.
+- Zero-infrastructure default: works out of the box (console) with no queue or DB.
+- Framework-agnostic core; thin adapters per framework; thin transports per sink.
+- Client-generated event identity, preserved for the queue transport's idempotency.
 
 ---
 
-### 2. Package Structure
+### 2. The Two-Axis Architecture (read this first)
+
+The single most important structural idea: **capture and delivery are independent
+axes, decoupled by the core.**
+
+```
+   ADAPTERS (capture context)      CORE            TRANSPORTS (deliver event)
+   ┌──────────────┐                                ┌────────────────────┐
+   │ express       │──┐          ┌──────────┐   ┌──│ console             │
+   │ fastify       │──┤          │  record  │   ├──│ file (jsonl/csv/xlsx)│
+   │ nestjs        │──┼─────────▶│  (core)  │──▶┼──│ queue (later module) │
+   │ node (manual) │──┘          └──────────┘   └──│ (custom)            │
+   └──────────────┘                                └────────────────────┘
+        ▲                                                    ▲
+   only job: read the request        only job: send the finished event
+   and populate context              somewhere; knows nothing of frameworks
+```
+
+Consequences of this design:
+
+- **Any adapter works with any transport.** Express→console, NestJS→file,
+  Fastify→queue — every combination works, because adapters and transports never
+  interact. They only talk to the core.
+- **Adding a transport touches no adapter**, and **adding a framework touches no
+  transport.** Each is added in isolation.
+- The RabbitMQ/DB pipeline is simply **one transport (the queue transport)**, built
+  last as a separate module — not the core of the SDK.
+
+---
+
+### 3. Package Structure
 
 ```
 packages/sdk/
 ├── src/
 │   ├── core/
-│   │   ├── storage.ts        → AsyncLocalStorage instance + helpers
-│   │   ├── producer.ts       → RabbitMQ connection + publish logic
-│   │   ├── record.ts         → public record() function
-│   │   ├── contextBuilder.ts → merges ALS context + explicit event data
-│   │   └── config.ts         → init(), validates config
+│   │   ├── storage.ts        → AsyncLocalStorage + RequestContext
+│   │   ├── record.ts         → public record(); builds event, hands to transport
+│   │   ├── configure.ts      → init: select transport, set service metadata
+│   │   ├── transport.ts      → the Transport interface
+│   │   └── flatten.ts        → shared helper: nested event → flat row (for tabular sinks)
+│   ├── transports/
+│   │   ├── console.ts        → ConsoleTransport (process.stdout / process.stderr)
+│   │   └── file.ts           → FileTransport (jsonl / csv / xlsx)
 │   ├── adapters/
 │   │   ├── express.ts
 │   │   ├── fastify.ts
-│   │   ├── nestjs.ts
-│   │   └── nextjs.ts
-│   ├── types.ts              → AuditEvent, EventType, Severity, InitConfig
-│   └── index.ts               → public exports only
+│   │   └── nestjs.ts
+│   └── index.ts               → public exports
 ├── package.json
 └── tsconfig.json
 ```
 
-Only `index.ts` is a public entry point. Adapters are exposed as **subpath exports** (`@tuorg/audit-sdk/express`, `/fastify`, etc.) so a project using Express never bundles NestJS-specific code, and vice versa.
+Adapters and transports are exposed as **subpath exports**
+(`@tnet06/mapa-audit-sdk/nestjs`, `@tnet06/mapa-audit-sdk/transports`) so a
+consumer only pulls in what they use. The `AuditEvent` type is imported from the
+shared package `@tnet06/mapa-audit-types` (never redeclared here). The queue
+transport lives in its **own package** (see §10), not here — it carries heavier
+dependencies.
 
 ---
 
-### 3. Public API Surface
+### 4. Event Data Model (nested canonical form, flattened on output)
 
-The entire public contract a consuming developer must learn:
+This is a foundational decision that shapes every transport, so it comes before the
+core mechanics.
+
+**The event is structured as a nested object, grouped by concern.** This is the
+single canonical representation that `record()` produces and that travels to the
+transport:
 
 ```ts
-import { initAuditSDK, record } from '@tuorg/audit-sdk';
-import { expressAdapter } from '@tuorg/audit-sdk/express';
+// defined in @tnet06/mapa-audit-types, imported by the SDK
+interface AuditEvent {
+  id: string;                 // client-generated UUID
+  correlationId?: string;
+  causationId?: string;
+  eventType: string;          // 'request' | 'business' | 'error' | 'security' | 'system' | 'audit'
+  eventName: string;
+  severity: string;           // 'debug' | 'info' | 'warn' | 'error' | 'critical'
+  outcome?: string;           // 'success' | 'failure' | 'partial'
+  occurredAt: string;         // ISO timestamp
 
-initAuditSDK({
-  serviceName: 'recipes-api',
-  serviceVersion: '1.4.0',
-  environment: 'production',
-  amqpUrl: process.env.AUDIT_AMQP_URL,
-});
+  service: {
+    name: string;
+    version?: string;
+    environment: string;
+    instanceId?: string;
+  };
 
-app.use(expressAdapter());
+  request?: {                 // present for HTTP-originated events
+    httpMethod?: string;
+    endpoint?: string;
+    routePattern?: string;
+    ipAddress?: string;
+    userAgent?: string;
+  };
 
-// anywhere in business logic — no request object needed:
-record({
-  eventType: 'business',
-  eventName: 'recipe.updated',
-  entityType: 'recipe',
-  entityId: recipeId,
-  payload: { changes: { title: { before, after } } },
-});
+  actor?: {                   // who caused it — human or machine
+    type?: string;            // 'user' | 'service' | 'system' | 'job'
+    userId?: string;
+    userRole?: string;
+    tenantId?: string;
+  };
+
+  entity?: {                  // the affected business resource
+    type?: string;
+    id?: string;
+  };
+
+  payload?: Record<string, unknown>;  // event-specific, genuinely variable data
+}
 ```
 
-Correlation ID, IP, endpoint, user, and service metadata are captured automatically by the adapter and merged in by `record()`. The developer never passes them manually.
+**Why nested internally:**
+
+- **Semantic clarity** — `event.request.ipAddress` communicates grouping that a
+  loose `ipAddress` among 20 fields does not.
+- **No name collisions** — `actor.userId` and `entity.id` coexist without ambiguity.
+- **Extensible** — adding a field to a group doesn't disturb the rest.
+
+**Why flatten only at output:** the nested form is canonical (one representation),
+but each destination wants a different shape. Flattening is the responsibility of
+the **transport** (via a shared `flatten()` helper), never the core:
+
+| Destination | Shape | Flatten? |
+|---|---|---|
+| JSON / JSONL | Nested, as-is | No — JSON represents nesting natively |
+| Console | Nested (single-line JSON) | No |
+| CSV / XLSX | Tabular columns (`request_ipAddress`, `actor_userId`, ...) | **Yes** |
+| TimescaleDB (future) | Fixed columns + `payload` as JSONB | **Yes**, for known fields; `payload` stays JSON |
+
+The rule: **flatten the known/structured fields into columns; leave the variable
+`payload` as JSON.** This maps cleanly onto the database schema (fixed columns +
+`payload JSONB`) when the queue transport is built. `flatten.ts` is a single shared
+utility so tabular transports don't each reimplement it (DRY).
 
 ---
 
-### 4. Core Modules
+### 5. The Core
 
-#### 4.1 `storage.ts` — AsyncLocalStorage
+#### 5.1 `storage.ts` — request context via AsyncLocalStorage
 
-Holds per-request context for the request's lifetime, regardless of how deep in the call stack `record()` is invoked. Framework-agnostic — it only knows how to store and retrieve a plain object for the current async execution context.
+`AsyncLocalStorage` provides a store that is **isolated per async execution
+chain** — i.e. per request. Two concurrent requests each get their own store; they
+never mix. This is what lets `record()` read the correct correlation ID deep in the
+call stack without the developer passing it around.
 
 ```ts
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 export interface RequestContext {
   correlationId: string;
-  requestId: string;
-  serviceName: string;
-  environment: string;
-  httpMethod?: string;
-  endpoint?: string;
-  routePattern?: string;
-  ipAddress?: string;
-  userAgent?: string;
-  serverName?: string;
-  userId?: string;
-  userRole?: string;
-  tenantId?: string;
+  causationId?: string;
+  request?: {
+    httpMethod?: string;
+    endpoint?: string;
+    routePattern?: string;
+    ipAddress?: string;
+    userAgent?: string;
+  };
+  actor?: {
+    type?: string;
+    userId?: string;
+    userRole?: string;
+    tenantId?: string;
+  };
 }
 
-export const auditContext = new AsyncLocalStorage<RequestContext>();
+export const contextStore = new AsyncLocalStorage<RequestContext>();
+
+export function getContext(): RequestContext | undefined {
+  return contextStore.getStore();
+}
 ```
 
-#### 4.2 `producer.ts` — RabbitMQ Publisher
+The context mirrors the nested event groups it feeds into, so merging in `record()`
+is a straightforward structural copy.
 
-Maintains a single long-lived connection/channel (using `amqp-connection-manager` for automatic reconnection, consistent with patterns already used in this codebase) and publishes events to the configured exchange.
-
-Its most important property: **it never throws into the caller's request flow.** If the queue is unreachable, it buffers events in a capped in-memory ring buffer and logs a warning. It does not retry synchronously and does not block the request.
+#### 5.2 `transport.ts` — the contract that makes transports interchangeable
 
 ```ts
-export async function publish(event: AuditEvent): Promise<void> {
+import type { AuditEvent } from '@tnet06/mapa-audit-types';
+
+// Every transport implements exactly this. Nothing more.
+export interface Transport {
+  send(event: AuditEvent): void | Promise<void>;
+}
+```
+
+The core depends only on this interface — never on a concrete transport. This is
+the seam that keeps console/file/queue swappable.
+
+#### 5.3 `record.ts` — the public event function
+
+```ts
+import { randomUUID } from 'node:crypto';
+import { getContext } from './storage';
+import type { Transport } from './transport';
+import type { AuditEvent } from '@tnet06/mapa-audit-types';
+
+let transport: Transport;
+let service: AuditEvent['service'];
+
+export function setTransport(t: Transport, svc: AuditEvent['service']) {
+  transport = t;
+  service = svc;
+}
+
+export function record(input: {
+  eventType: string;
+  eventName: string;
+  severity?: string;
+  outcome?: string;
+  entity?: { type?: string; id?: string };
+  payload?: Record<string, unknown>;
+}): void {
+  const ctx = getContext();
+
+  const event: AuditEvent = {
+    id: randomUUID(),                     // client-generated (idempotency-ready)
+    correlationId: ctx?.correlationId,    // same ID for the whole request
+    causationId: ctx?.causationId,
+    eventType: input.eventType,
+    eventName: input.eventName,
+    severity: input.severity ?? 'info',
+    outcome: input.outcome,
+    occurredAt: new Date().toISOString(),
+    service,
+    request: ctx?.request,
+    actor: ctx?.actor,
+    entity: input.entity,
+    payload: input.payload ?? {},
+  };
+
+  // Fire-and-forget: never block or throw into the host app.
   try {
-    await channel.publish(EXCHANGE_NAME, event.eventType, serialize(event));
-  } catch (err) {
-    bufferLocally(event);
-    logger.warn('[audit-sdk] queue unreachable, event buffered locally');
+    void transport.send(event);
+  } catch {
+    /* a transport failure must never surface to business logic */
   }
 }
 ```
 
-> **Durability note (see §7).** This in-memory buffer is a *best-effort* mechanism. It follows directly from the platform's observability-first positioning: protecting the host application is worth more than guaranteeing every single event. This is a conscious trade-off, not an oversight, and it is the SDK's single most consequential behavioral decision.
+Two invariants preserved from the original design:
 
-#### 4.3 `record.ts` — Public Event Function
+- **`id` is generated client-side.** Harmless for console/file, but essential for
+  the queue transport's `ON CONFLICT` idempotency later. Generating it here means
+  the contract holds regardless of transport.
+- **Fire-and-forget.** `record()` never blocks business logic and never throws into
+  the host app, whatever the transport.
 
-```ts
-export function record(input: RecordInput): void {
-  const ctx = auditContext.getStore();
-
-  const event: AuditEvent = {
-    id: randomUUID(),                 // generated HERE, client-side — see §6
-    correlationId: ctx?.correlationId ?? randomUUID(),
-    requestId: ctx?.requestId,
-    serviceName: config.serviceName,
-    serviceVersion: config.serviceVersion,
-    environment: config.environment,
-    eventType: input.eventType,
-    eventName: input.eventName,
-    severity: input.severity ?? defaultSeverityFor(input.eventType),
-    httpMethod: ctx?.httpMethod,
-    endpoint: ctx?.endpoint,
-    routePattern: ctx?.routePattern,
-    ipAddress: ctx?.ipAddress,
-    userAgent: ctx?.userAgent,
-    serverName: ctx?.serverName,
-    userId: ctx?.userId,
-    userRole: ctx?.userRole,
-    tenantId: ctx?.tenantId,
-    entityType: input.entityType,
-    entityId: input.entityId,
-    payloadSchemaVersion: input.payloadSchemaVersion ?? 1,  // see §8
-    payload: input.payload ?? {},
-    occurredAt: new Date().toISOString(),
-  };
-
-  void publish(event); // fire-and-forget, never awaited by caller
-}
-```
-
-`record()` is intentionally **synchronous and fire-and-forget** from the caller's perspective. Business logic must never wait on audit logging — awaiting it would reintroduce exactly the coupling the queue exists to remove.
-
-#### 4.4 `config.ts` — Initialization
+#### 5.4 `configure.ts` — initialization
 
 ```ts
-export interface InitConfig {
+export interface AuditConfig {
   serviceName: string;
   serviceVersion?: string;
   environment: 'development' | 'staging' | 'production';
-  amqpUrl: string;
-  exchangeName?: string;   // default: 'audit.events'
-  bufferSize?: number;     // default: 1000
+  transport?: Transport;   // optional — defaults to ConsoleTransport
 }
 
-export function initAuditSDK(cfg: InitConfig): void { ... }
+export function configureAudit(cfg: AuditConfig): void {
+  const transport = cfg.transport ?? new ConsoleTransport();
+  setTransport(transport, {
+    name: cfg.serviceName,
+    version: cfg.serviceVersion,
+    environment: cfg.environment,
+  });
+}
 ```
 
-Configuration is always explicit via `initAuditSDK()` — never inferred from ambient environment variables inside the SDK. The consuming app decides how to source `amqpUrl` and passes it in, keeping the contract simple and testable. `environment` is validated against the same allowed values the database enforces, so invalid values fail fast at startup rather than silently at insert.
+If no transport is provided, the SDK falls back to `ConsoleTransport` so it works
+with zero setup. `environment` is validated against the same allowed values the
+database enforces.
 
 ---
 
-### 5. Adapters
+### 6. Transports
 
-Adapters are the **only** framework-specific code in the package. Each has exactly one job: read the incoming request in whatever shape the framework exposes, build a `RequestContext`, and run the remainder of the request inside `auditContext.run(context, next)`.
+Each transport is a self-contained class implementing `Transport.send()`. They
+share nothing (except the `flatten()` helper for tabular formats) and are added
+independently.
+
+#### 6.1 ConsoleTransport (default, zero infrastructure)
+
+Writes directly to `process.stdout` / `process.stderr` — **not** `console.log`.
+`console.log` is a wrapper over stdout that adds its own formatting and inspection
+overhead; writing the file descriptor directly gives full control over the output
+and better throughput. This is the same approach Pino and Winston take, and is why
+they're fast. Errors/critical go to stderr (standard convention), everything else
+to stdout, so operators can redirect them separately.
+
+```ts
+export class ConsoleTransport implements Transport {
+  send(event: AuditEvent): void {
+    const line = JSON.stringify(event) + '\n';
+    if (event.severity === 'error' || event.severity === 'critical') {
+      process.stderr.write(line);
+    } else {
+      process.stdout.write(line);
+    }
+  }
+}
+```
+
+The event stays **nested** here (JSON preserves structure naturally). Delivers
+value immediately with no queue or DB — the automatic context capture is already
+useful on its own.
+
+#### 6.2 FileTransport (jsonl / csv)
+
+Writes structured events to a file. Default format **JSON Lines** (one JSON object
+per line — the standard for appendable logs, keeps the nested structure). CSV uses
+the shared `flatten()` helper to produce columns.
+
+```ts
+export class FileTransport implements Transport {
+  constructor(private opts: { path: string; format?: 'jsonl' | 'csv' }) {}
+  send(event: AuditEvent): void { /* jsonl: append nested JSON; csv: append flatten(event) */ }
+}
+```
+
+#### 6.3 QueueTransport (later module — see §10)
+
+The RabbitMQ → Worker → TimescaleDB pipeline, packaged separately. **Opt-in and
+self-hosted**: consumers who choose it run their own queue + worker + database
+(provided via Docker/Terraform), pointing the SDK at their own instance. It
+flattens known fields to columns and stores `payload` as JSONB (per §4). Built
+last; console and file ship first.
+
+---
+
+### 7. Adapters
+
+Adapters are the **only** framework-specific code. Each reads the incoming request
+in that framework's shape, builds a `RequestContext`, and runs the rest of the
+request inside `contextStore.run(context, next)`.
 
 | Framework | Mechanism |
 |---|---|
-| Express | Standard middleware `(req, res, next)` |
+| Express | Middleware `(req, res, next)` |
 | Fastify | `onRequest` hook |
-| NestJS | `Interceptor` (fits Nest's DI and execution-context model better than raw middleware) |
-| Next.js | Depends on router type — Middleware for App Router, or a wrapper around Route Handlers |
+| NestJS | Middleware or Interceptor (fits Nest's execution model) |
+| Node (manual) | A helper to open a context explicitly, for non-HTTP entry points (jobs, scripts) |
 
-Example (Express):
+Example (NestJS middleware):
 
 ```ts
-export function expressAdapter() {
-  return (req: Request, res: Response, next: NextFunction) => {
+@Injectable()
+export class AuditMiddleware implements NestMiddleware {
+  use(req: any, _res: any, next: () => void) {
     const context: RequestContext = {
-      correlationId: (req.headers['x-correlation-id'] as string) ?? randomUUID(),
-      requestId: randomUUID(),
-      serviceName: config.serviceName,
-      environment: config.environment,
-      httpMethod: req.method,
-      endpoint: req.originalUrl,
-      routePattern: req.route?.path,
-      ipAddress: req.ip,
-      userAgent: req.headers['user-agent'],
-      serverName: os.hostname(),
-      userId: (req as any).user?.id,
-      userRole: (req as any).user?.role,
+      correlationId: req.headers['x-correlation-id'] ?? randomUUID(),
+      request: {
+        httpMethod: req.method,
+        endpoint: req.originalUrl,
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+      },
+      actor: { userId: req.user?.id, userRole: req.user?.role },
     };
-    auditContext.run(context, next);
-  };
+    contextStore.run(context, () => next());
+  }
 }
 ```
 
-Supporting a new framework = one new adapter file. The core never changes.
+Correlation ID: reused from the `x-correlation-id` header if present (cross-service
+correlation), otherwise generated — this service becomes the origin. The same ID
+lives in the store for the whole request; every `record()` call during that request
+reads it automatically. Concurrent requests are isolated by `AsyncLocalStorage` —
+they never share or mix IDs.
 
 ---
 
-### 6. Idempotency Contract (the SDK's most important guarantee)
+### 8. Usage Example (NestJS, console transport)
 
-The SDK generates `event.id` **before publishing**, not the database at insert time. This is what makes the Worker's deduplication possible: if RabbitMQ redelivers a message (at-least-once delivery), the same `id` arrives twice, and the Worker safely applies `ON CONFLICT DO NOTHING`. If `id` were left to the database, every redelivery would silently create a duplicate row.
+```ts
+// main.ts — configure once
+import { configureAudit } from '@tnet06/mapa-audit-sdk';
+import { ConsoleTransport } from '@tnet06/mapa-audit-sdk/transports';
 
-This is a **fixed platform-wide contract**, not an implementation detail. Changing where `id` is generated is a breaking change across the entire platform.
+configureAudit({
+  serviceName: 'recipes-api',
+  environment: 'production',
+  transport: new ConsoleTransport(),   // or omit for the default; or FileTransport
+});
+```
+
+```ts
+// app.module.ts — register the adapter
+consumer.apply(AuditMiddleware).forRoutes('*');
+```
+
+```ts
+// recipes.controller.ts — record anywhere, no context passed manually
+record({
+  eventType: 'business',
+  eventName: 'recipe.updated',
+  outcome: 'success',
+  entity: { type: 'recipe', id: recipe.id },
+  payload: { changes: { title: { before, after } } },
+});
+// automatically carries correlationId, request.*, actor.* of THIS request
+```
+
+Switching to file output is a one-line change at `configureAudit` — no controller
+or middleware code changes.
 
 ---
 
-### 7. Durability & Failure Modes
+### 9. Failure & Durability (per transport)
 
-Consistent with the platform's observability-first positioning, the SDK prioritizes host-application safety over event-delivery guarantees.
+Durability depends on the chosen transport, not the SDK core:
 
-| Scenario | SDK Behavior |
+| Transport | Durability characteristics |
 |---|---|
-| RabbitMQ unreachable at publish time | Buffer in memory (capped), log warning, never throw |
-| In-memory buffer full | Oldest events dropped, warning logged with drop count |
-| Host process crashes with buffered events | **Buffered events are lost** — buffer is in-memory only in v1 |
-| `record()` called outside a request context (no ALS store) | Event still published; `correlationId` generated fresh, request-specific fields left `null` |
-| Malformed `payload` (circular reference, etc.) | Caught at serialization; event dropped with an error log — never crashes the host |
+| Console | Ephemeral — goes to stdout/stderr; capture is best-effort by nature |
+| File | Persisted to local disk; durability = the file's durability |
+| Queue | Decoupled pipeline; best-effort producer buffer (documented in the queue-transport module) |
 
-> **Explicit limitation:** because the buffer is in-memory, events can be lost on queue outage + buffer overflow, or on process crash. Teams requiring guaranteed capture for specific event types must treat that as a scoped platform extension (a disk-backed buffer or a synchronous local-durable write path), not an assumption about v1 behavior.
-
----
-
-### 8. Payload Schema Governance
-
-JSONB flexibility is a strength, but ungoverned it becomes a maintenance swamp where no one knows what fields exist per `event_type`, and dashboards break when a service silently changes its payload shape.
-
-To keep flexibility without chaos:
-
-- Every event carries a `payloadSchemaVersion` (defaulting to `1`), persisted as a fixed column in the database.
-- When a service changes the shape of its payload for a given `eventName`, it increments the version. Dashboards and API consumers can then branch on version instead of guessing.
-- A lightweight, per-service **event catalog** (which `eventName`s a service emits, and the expected payload shape per version) is recommended documentation — cheap to maintain, invaluable six months in.
-
-This costs almost nothing to add now and is impossible to reconstruct retroactively.
+Universal guarantee across all transports: **`record()` never blocks or throws into
+the host application.** A transport error is contained and, where sensible, logged —
+never propagated to business logic.
 
 ---
 
-### 9. Sensitive Data Responsibility
+### 10. Distribution & Packaging
 
-The SDK captures personal data by design — `ipAddress`, `userId`, `userAgent`. Consuming teams and platform operators should be aware:
-
-- This is PII and subject to data-protection obligations wherever the organization operates.
-- The SDK provides a config-level hook (planned) to **opt out of** or **hash** specific fields (e.g. IP anonymization) at capture time, for services that don't need raw values. Until built, teams should be conscious of what they capture.
-- Retention and per-user erasure are handled downstream (storage layer / platform policy), not in the SDK — but the SDK is the capture point, so field-level minimization here is the cheapest place to reduce exposure.
-
----
-
-### 10. Correlation ID Propagation
-
-- If an incoming request carries an `x-correlation-id` header, the adapter reuses it — this is what enables correlation **across services**, not just within one.
-- If absent, the adapter generates a new UUID; this service becomes the origin of the correlation chain.
-- Propagating the header on **outbound** internal HTTP calls is currently the consuming team's responsibility. Automatic propagation would require the SDK to also wrap the HTTP client — a documented future addition, out of scope for v1.
-
----
-
-### 11. Versioning & Distribution
-
-- **Semantic versioning** enforced via `changesets` — every PR touching `packages/sdk` requires a changeset stating patch/minor/major intent.
-- **Framework packages** (`express`, `fastify`, etc.) are declared as `peerDependencies`, never bundled — the host's installed version is used, avoiding duplicate copies and version conflicts.
-- **Published to npm** (public registry for portfolio purposes; a private registry such as GitHub Packages is the equivalent in a real company setting).
+- **`@tnet06/mapa-audit-sdk`** — core + console + file transports + adapters. Main
+  package; zero heavy dependencies; works standalone.
+- **`@tnet06/mapa-audit-types`** — shared event contract; published alongside the
+  SDK (the SDK depends on it).
+- **Queue transport in its own package** (e.g. `@tnet06/mapa-audit-transport-queue`)
+  — carries `amqp-connection-manager` and related deps, so console/file-only
+  consumers never install them. Built last.
+- **Worker + infra are NOT npm packages** — they're deployable services
+  (Docker/Terraform), used only by consumers who adopt the queue transport.
+- Semantic versioning via `changesets`; framework deps as `peerDependencies`;
+  MIT-licensed; published to the public npm registry for portfolio/community use, or
+  an internal registry in a company context — same code, different registry.
 
 ---
 
-### 12. Out of Scope for v1
+### 11. Out of Scope for v1
 
-- Disk-backed / crash-durable buffer (in-memory only today).
+- Queue transport + Worker + TimescaleDB module (built after console/file are solid).
+- Additional framework adapters beyond the first (each its own later phase).
 - Automatic correlation-ID propagation on outbound HTTP calls.
-- Built-in PII hashing/anonymization hooks (planned, not yet implemented).
-- Event batching/compression.
-- Browser/frontend SDK variant.
+- Built-in PII hashing at capture (planned config hook).
 
-Documented as conscious boundaries, each a candidate for a future scoped iteration.
+Documented as conscious boundaries — the console/file path is the v1 focus; the
+queue path is a deliberate later module.

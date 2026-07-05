@@ -31,45 +31,38 @@ export const environments = ['development', 'staging', 'production'] as const;
 
 export type Environment = (typeof environments)[number];
 
-export type JsonPrimitive = string | number | boolean | null;
-
-export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
-
-export interface JsonObject {
-  [key: string]: JsonValue;
-}
-
 export interface AuditEvent {
   id: string;
-  correlation_id: string;
-  causation_id?: string;
-  request_id?: string;
-  trace_id?: string;
-  span_id?: string;
-  service_name: string;
-  service_version?: string;
-  instance_id?: string;
-  server_name?: string;
-  environment: Environment;
-  event_type: EventType;
-  event_name: string;
+  correlationId?: string;
+  causationId?: string;
+  eventType: EventType;
+  eventName: string;
   severity: EventSeverity;
   outcome?: EventOutcome;
-  actor_type?: ActorType;
-  user_id?: string;
-  user_role?: string;
-  tenant_id?: string;
-  http_method?: string;
-  endpoint?: string;
-  route_pattern?: string;
-  status_code?: number;
-  duration_ms?: number;
-  ip_address?: string;
-  user_agent?: string;
-  entity_type?: string;
-  entity_id?: string;
-  payload_schema_version: number;
-  payload: JsonObject;
-  occurred_at: string;
-  created_at?: string;
+  occurredAt: string;
+  payloadSchemaVersion?: number;
+  service: {
+    name: string;
+    version?: string;
+    environment: Environment;
+    instanceId?: string;
+  };
+  request?: {
+    httpMethod?: string;
+    endpoint?: string;
+    routePattern?: string;
+    ipAddress?: string;
+    userAgent?: string;
+  };
+  actor?: {
+    type?: ActorType;
+    userId?: string;
+    userRole?: string;
+    tenantId?: string;
+  };
+  entity?: {
+    type?: string;
+    id?: string;
+  };
+  payload?: Record<string, unknown>;
 }
