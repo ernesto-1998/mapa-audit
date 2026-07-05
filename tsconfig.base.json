@@ -19,9 +19,6 @@
     "composite": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "baseUrl": ".",
-    "paths": {
-      "@tnet06/mapa-audit-types": ["packages/types/src/index.ts"]
-    }
+    "types": ["node"]
   }
 }
