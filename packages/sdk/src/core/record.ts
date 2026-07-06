@@ -48,11 +48,11 @@ export function record(input: RecordInput): void {
     const result = transport.send(event);
 
     if (result instanceof Promise) {
-      result.catch(() => {
-
+      result.catch((error: unknown) => {
+        void error;
       });
     }
-  } catch {
-
+  } catch (error: unknown) {
+    void error;
   }
 }

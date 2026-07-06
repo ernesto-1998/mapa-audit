@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AuditEvent, Environment } from '@tnet06/mapa-audit-types';
 import { configureAudit } from '../../src/core/configure.js';
 import { record } from '../../src/core/record.js';
@@ -25,6 +25,10 @@ function createCapturingTransport(): {
 }
 
 describe('record', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('generates a client-side UUID for each event', () => {
     const { events, transport } = createCapturingTransport();
 
@@ -143,6 +147,11 @@ describe('record', () => {
   });
 
   it('does not throw when no transport is configured yet', () => {
+    const stdoutWrite = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
     configureAudit({
       serviceName: 'recipes-api',
       environment: 'development'
@@ -154,6 +163,7 @@ describe('record', () => {
         eventName: 'recipe.updated'
       });
     }).not.toThrow();
+    expect(stdoutWrite).toHaveBeenCalledTimes(1);
   });
 
   it('does not propagate synchronous transport failures', () => {

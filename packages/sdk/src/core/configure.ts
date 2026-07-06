@@ -3,6 +3,7 @@ import {
   type AuditEvent,
   type Environment
 } from '@tnet06/mapa-audit-types';
+import { ConsoleTransport } from '../transports/console.js';
 import type { Transport } from './transport.js';
 
 export interface AuditConfig {
@@ -37,7 +38,7 @@ export function configureAudit(config: AuditConfig): void {
     environment: config.environment
   };
 
-  state.transport = config.transport;
+  state.transport = config.transport ?? new ConsoleTransport();
 }
 
 export function getConfiguredService(): AuditEvent['service'] | undefined {
