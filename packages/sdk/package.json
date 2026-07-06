@@ -13,6 +13,10 @@
     "./transports": {
       "types": "./dist/transports/index.d.ts",
       "import": "./dist/transports/index.js"
+    },
+    "./express": {
+      "types": "./dist/adapters/express.d.ts",
+      "import": "./dist/adapters/express.js"
     }
   },
   "files": [
@@ -23,5 +27,16 @@
   },
   "dependencies": {
     "@tnet06/mapa-audit-types": "0.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6"
+  },
+  "peerDependencies": {
+    "express": "^4.0.0 || ^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "express": {
+      "optional": true
+    }
   }
 }

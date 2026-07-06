@@ -1,0 +1,65 @@
+import { randomUUID } from 'node:crypto';
+import type { NextFunction, Request, RequestHandler } from 'express';
+import { contextStore, type RequestContext } from '../core/storage.js';
+
+type RequestWithOptionalUser = Request & {
+  user?: {
+    id?: unknown;
+    role?: unknown;
+  };
+  route?: {
+    path?: unknown;
+  };
+};
+
+export function expressAdapter(): RequestHandler {
+  return (req: Request, _res, next: NextFunction): void => {
+    const request = req as RequestWithOptionalUser;
+    const headerCorrelationId = nonEmptyString(request.get('x-correlation-id'));
+    const userAgent = nonEmptyString(request.get('user-agent'));
+    const routePattern = getRoutePattern(request);
+    const actor = getActor(request);
+
+    const context: RequestContext = {
+      correlationId: headerCorrelationId ?? randomUUID(),
+      request: {
+        httpMethod: request.method,
+        endpoint: request.originalUrl,
+        ...(routePattern === undefined ? {} : { routePattern }),
+        ...(request.ip === undefined ? {} : { ipAddress: request.ip }),
+        ...(userAgent === undefined ? {} : { userAgent })
+      },
+      ...(actor === undefined ? {} : { actor })
+    };
+
+    contextStore.run(context, () => next());
+  };
+}
+
+function getRoutePattern(request: RequestWithOptionalUser): string | undefined {
+  return nonEmptyString(request.route?.path);
+}
+
+function getActor(
+  request: RequestWithOptionalUser
+): NonNullable<RequestContext['actor']> | undefined {
+  const userId = nonEmptyString(request.user?.id);
+  const userRole = nonEmptyString(request.user?.role);
+
+  if (userId === undefined && userRole === undefined) {
+    return undefined;
+  }
+
+  return {
+    ...(userId === undefined ? {} : { userId }),
+    ...(userRole === undefined ? {} : { userRole })
+  };
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) {
+    return undefined;
+  }
+
+  return value;
+}
