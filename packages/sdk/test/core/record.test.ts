@@ -35,7 +35,7 @@ describe('record', () => {
     configureAudit({
       serviceName: 'recipes-api',
       environment: 'development',
-      transport
+      transports: [transport]
     });
 
     record({
@@ -71,7 +71,7 @@ describe('record', () => {
       serviceName: 'recipes-api',
       serviceVersion: '1.2.3',
       environment: 'staging',
-      transport
+      transports: [transport]
     });
 
     contextStore.run(context, () => {
@@ -122,7 +122,7 @@ describe('record', () => {
     configureAudit({
       serviceName: 'jobs-api',
       environment: 'production',
-      transport
+      transports: [transport]
     });
 
     expect(() => {
@@ -146,7 +146,7 @@ describe('record', () => {
     expect(events[0]?.correlationId).toBeUndefined();
   });
 
-  it('does not throw when no transport is configured yet', () => {
+  it('uses the default console transport when no transports are configured', () => {
     const stdoutWrite = vi
       .spyOn(process.stdout, 'write')
       .mockImplementation(() => true);
@@ -166,15 +166,105 @@ describe('record', () => {
     expect(stdoutWrite).toHaveBeenCalledTimes(1);
   });
 
+  it('sends the same event to every configured transport', () => {
+    const first = createCapturingTransport();
+    const second = createCapturingTransport();
+
+    configureAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [first.transport, second.transport]
+    });
+
+    record({
+      eventType: 'business',
+      eventName: 'recipe.updated'
+    });
+
+    expect(first.events).toHaveLength(1);
+    expect(second.events).toHaveLength(1);
+    expect(second.events[0]).toBe(first.events[0]);
+  });
+
+  it('isolates synchronous transport failures from other transports', () => {
+    const working = createCapturingTransport();
+
+    configureAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [
+        {
+          send() {
+            throw new Error('transport failed');
+          }
+        },
+        working.transport
+      ]
+    });
+
+    expect(() => {
+      record({
+        eventType: 'business',
+        eventName: 'recipe.updated'
+      });
+    }).not.toThrow();
+
+    expect(working.events).toHaveLength(1);
+  });
+
+  it('isolates asynchronous transport rejections from other transports', async () => {
+    const working = createCapturingTransport();
+
+    configureAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [
+        {
+          async send() {
+            await Promise.reject(new Error('transport rejected'));
+          }
+        },
+        working.transport
+      ]
+    });
+
+    expect(() => {
+      record({
+        eventType: 'business',
+        eventName: 'recipe.updated'
+      });
+    }).not.toThrow();
+
+    await Promise.resolve();
+    expect(working.events).toHaveLength(1);
+  });
+
+  it('does not throw when configured with an empty transports array', () => {
+    configureAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: []
+    });
+
+    expect(() => {
+      record({
+        eventType: 'business',
+        eventName: 'recipe.updated'
+      });
+    }).not.toThrow();
+  });
+
   it('does not propagate synchronous transport failures', () => {
     configureAudit({
       serviceName: 'recipes-api',
       environment: 'development',
-      transport: {
-        send() {
-          throw new Error('transport failed');
+      transports: [
+        {
+          send() {
+            throw new Error('transport failed');
+          }
         }
-      }
+      ]
     });
 
     expect(() => {
@@ -189,11 +279,13 @@ describe('record', () => {
     configureAudit({
       serviceName: 'recipes-api',
       environment: 'development',
-      transport: {
-        async send() {
-          await Promise.reject(new Error('transport rejected'));
+      transports: [
+        {
+          async send() {
+            await Promise.reject(new Error('transport rejected'));
+          }
         }
-      }
+      ]
     });
 
     expect(() => {

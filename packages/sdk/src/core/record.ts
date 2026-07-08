@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { AuditEvent } from '@tnet06/mapa-audit-types';
-import { getConfiguredService, getConfiguredTransport } from './configure.js';
+import { getConfiguredService, getConfiguredTransports } from './configure.js';
 import { getContext } from './storage.js';
 
 export interface RecordInput {
@@ -38,21 +38,17 @@ export function record(input: RecordInput): void {
     payload: input.payload ?? {}
   };
 
-  const transport = getConfiguredTransport();
+  for (const transport of getConfiguredTransports()) {
+    try {
+      const result = transport.send(event);
 
-  if (transport === undefined) {
-    return;
-  }
-
-  try {
-    const result = transport.send(event);
-
-    if (result instanceof Promise) {
-      result.catch((error: unknown) => {
-        void error;
-      });
+      if (result instanceof Promise) {
+        result.catch((error: unknown) => {
+          void error;
+        });
+      }
+    } catch (error: unknown) {
+      void error;
     }
-  } catch (error: unknown) {
-    void error;
   }
 }

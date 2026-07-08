@@ -10,17 +10,17 @@ export interface AuditConfig {
   serviceName: string;
   serviceVersion?: string;
   environment: Environment;
-  transport?: Transport;
+  transports?: Transport[];
 }
 
 interface AuditRuntimeState {
   service: AuditEvent['service'] | undefined;
-  transport: Transport | undefined;
+  transports: Transport[];
 }
 
 const state: AuditRuntimeState = {
   service: undefined,
-  transport: undefined
+  transports: []
 };
 
 export function configureAudit(config: AuditConfig): void {
@@ -38,15 +38,15 @@ export function configureAudit(config: AuditConfig): void {
     environment: config.environment
   };
 
-  state.transport = config.transport ?? new ConsoleTransport();
+  state.transports = config.transports ?? [new ConsoleTransport()];
 }
 
 export function getConfiguredService(): AuditEvent['service'] | undefined {
   return state.service;
 }
 
-export function getConfiguredTransport(): Transport | undefined {
-  return state.transport;
+export function getConfiguredTransports(): readonly Transport[] {
+  return state.transports;
 }
 
 function isEnvironment(value: string): value is Environment {

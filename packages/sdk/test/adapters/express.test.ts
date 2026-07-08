@@ -151,7 +151,7 @@ describe('expressAdapter', () => {
     configureAudit({
       serviceName: 'recipes-api',
       environment: 'development',
-      transport
+      transports: [transport]
     });
 
     expressAdapter()(
