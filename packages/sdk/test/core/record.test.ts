@@ -17,6 +17,8 @@ import { FileTransport } from '../../src/transports/file.js';
 
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const missingGlobalAuditWarning =
+  '[mapa-audit] record() called before initGlobalAudit() - events are being discarded. Call initGlobalAudit() at startup, or use createAudit() for an explicit instance.';
 const tempDirs: string[] = [];
 
 function createCapturingTransport(): {
@@ -307,6 +309,66 @@ describe('record', () => {
     }).not.toThrow();
   });
 
+  it('warns only once when global record is called before initialization', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+
+    expect(() => {
+      record({
+        eventType: 'business',
+        eventName: 'recipe.updated'
+      });
+      record({
+        eventType: 'business',
+        eventName: 'recipe.deleted'
+      });
+    }).not.toThrow();
+
+    expect(emitWarning).toHaveBeenCalledTimes(1);
+    expect(emitWarning).toHaveBeenCalledWith(missingGlobalAuditWarning);
+  });
+
+  it('resetGlobalAudit resets the missing global warning state', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+
+    record({
+      eventType: 'business',
+      eventName: 'recipe.updated'
+    });
+    resetGlobalAudit();
+    record({
+      eventType: 'business',
+      eventName: 'recipe.deleted'
+    });
+
+    expect(emitWarning).toHaveBeenCalledTimes(2);
+    expect(emitWarning).toHaveBeenNthCalledWith(1, missingGlobalAuditWarning);
+    expect(emitWarning).toHaveBeenNthCalledWith(2, missingGlobalAuditWarning);
+  });
+
+  it('does not warn for explicit audit instances without a global instance', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const { events, transport } = createCapturingTransport();
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    audit.record({
+      eventType: 'business',
+      eventName: 'recipe.updated'
+    });
+
+    expect(events).toHaveLength(1);
+    expect(emitWarning).not.toHaveBeenCalled();
+  });
+
   it('does not propagate synchronous transport failures', () => {
     initGlobalAudit({
       serviceName: 'recipes-api',
@@ -352,6 +414,9 @@ describe('record', () => {
   });
 
   it('resetGlobalAudit clears the global singleton state between tests', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
     const { events, transport } = createCapturingTransport();
 
     initGlobalAudit({
@@ -372,6 +437,8 @@ describe('record', () => {
 
     expect(events).toHaveLength(1);
     expect(events[0]?.eventName).toBe('recipe.updated');
+    expect(emitWarning).toHaveBeenCalledTimes(1);
+    expect(emitWarning).toHaveBeenCalledWith(missingGlobalAuditWarning);
   });
 
   it('drains pending FileTransport writes on instance shutdown', async () => {
