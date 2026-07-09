@@ -25,6 +25,7 @@ type MockRequest = Request & {
 
 function createRequest(options: {
   correlationId?: string;
+  causationId?: string;
   userAgent?: string;
   method?: string;
   originalUrl?: string;
@@ -34,6 +35,7 @@ function createRequest(options: {
     id?: string;
     role?: string;
   };
+  headers?: Record<string, string>;
 }): MockRequest {
   const headers = new Map<string, string>();
 
@@ -41,8 +43,16 @@ function createRequest(options: {
     headers.set('x-correlation-id', options.correlationId);
   }
 
+  if (options.causationId !== undefined) {
+    headers.set('x-causation-id', options.causationId);
+  }
+
   if (options.userAgent !== undefined) {
     headers.set('user-agent', options.userAgent);
+  }
+
+  for (const [name, value] of Object.entries(options.headers ?? {})) {
+    headers.set(name.toLowerCase(), value);
   }
 
   return {
@@ -124,6 +134,37 @@ describe('expressAdapter', () => {
     );
   });
 
+  it('sets causationId from x-causation-id when present', () => {
+    expressAdapter()(
+      createRequest({ causationId: 'causation-from-header' }),
+      {} as Response,
+      () => {
+        expect(getContext()?.causationId).toBe('causation-from-header');
+      }
+    );
+  });
+
+  it('leaves causationId absent when x-causation-id is missing', () => {
+    expressAdapter()(createRequest({}), {} as Response, () => {
+      expect(getContext()?.causationId).toBeUndefined();
+    });
+  });
+
+  it('uses a custom correlationId header when configured', () => {
+    expressAdapter({ correlationIdHeader: 'x-trace-id' })(
+      createRequest({
+        correlationId: 'ignored-correlation',
+        headers: {
+          'x-trace-id': 'trace-from-custom-header'
+        }
+      }),
+      {} as Response,
+      () => {
+        expect(getContext()?.correlationId).toBe('trace-from-custom-header');
+      }
+    );
+  });
+
   it('generates a UUID correlationId when the header is absent', () => {
     expressAdapter()(createRequest({}), {} as Response, () => {
       expect(getContext()?.correlationId).toMatch(uuidPattern);
@@ -151,6 +192,29 @@ describe('expressAdapter', () => {
         }
       );
     }).not.toThrow();
+  });
+
+  it('uses custom actor extraction instead of req.user', () => {
+    expressAdapter({
+      extractActor: () => ({
+        type: 'service',
+        userId: 'custom-id'
+      })
+    })(
+      createRequest({
+        user: {
+          id: 'ignored-user',
+          role: 'ignored-role'
+        }
+      }),
+      {} as Response,
+      () => {
+        expect(getContext()?.actor).toEqual({
+          type: 'service',
+          userId: 'custom-id'
+        });
+      }
+    );
   });
 
   it('lets record() use context captured by the adapter', () => {

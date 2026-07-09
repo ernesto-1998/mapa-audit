@@ -4,6 +4,16 @@ import type { ActorType } from '@tnet06/mapa-audit-types';
 import { contextStore, type RequestContext } from '../core/storage.js';
 
 const authenticatedActorType: ActorType = 'user';
+const defaultCorrelationIdHeader = 'x-correlation-id';
+const defaultCausationIdHeader = 'x-causation-id';
+
+export interface ExpressAdapterOptions {
+  correlationIdHeader?: string;
+  causationIdHeader?: string;
+  extractActor?: (
+    req: Request
+  ) => NonNullable<RequestContext['actor']> | undefined;
+}
 
 type RequestWithOptionalUser = Request & {
   user?: {
@@ -15,16 +25,29 @@ type RequestWithOptionalUser = Request & {
   };
 };
 
-export function expressAdapter(): RequestHandler {
+export function expressAdapter(
+  options: ExpressAdapterOptions = {}
+): RequestHandler {
   return (req: Request, _res, next: NextFunction): void => {
     const request = req as RequestWithOptionalUser;
-    const headerCorrelationId = nonEmptyString(request.get('x-correlation-id'));
+    const headerCorrelationId = nonEmptyString(
+      request.get(options.correlationIdHeader ?? defaultCorrelationIdHeader)
+    );
+    const headerCausationId = nonEmptyString(
+      request.get(options.causationIdHeader ?? defaultCausationIdHeader)
+    );
     const userAgent = nonEmptyString(request.get('user-agent'));
     const routePattern = getRoutePattern(request);
-    const actor = getActor(request);
+    const actor =
+      options.extractActor === undefined
+        ? getActor(request)
+        : options.extractActor(req);
 
     const context: RequestContext = {
       correlationId: headerCorrelationId ?? randomUUID(),
+      ...(headerCausationId === undefined
+        ? {}
+        : { causationId: headerCausationId }),
       request: {
         httpMethod: request.method,
         endpoint: request.originalUrl,
