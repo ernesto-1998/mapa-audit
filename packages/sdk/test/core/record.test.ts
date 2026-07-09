@@ -1,12 +1,23 @@
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AuditEvent, Environment } from '@tnet06/mapa-audit-types';
-import { configureAudit } from '../../src/core/configure.js';
+import { createAudit } from '../../src/core/audit-instance.js';
+import {
+  getGlobalAudit,
+  initGlobalAudit,
+  resetGlobalAudit,
+  shutdownGlobalAudit
+} from '../../src/core/global-audit.js';
 import { record } from '../../src/core/record.js';
 import { contextStore, type RequestContext } from '../../src/core/storage.js';
 import type { Transport } from '../../src/core/transport.js';
+import { FileTransport } from '../../src/transports/file.js';
 
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const tempDirs: string[] = [];
 
 function createCapturingTransport(): {
   transport: Transport;
@@ -25,14 +36,18 @@ function createCapturingTransport(): {
 }
 
 describe('record', () => {
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
+    resetGlobalAudit();
+    await Promise.all(
+      tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))
+    );
   });
 
   it('generates a client-side UUID for each event', () => {
     const { events, transport } = createCapturingTransport();
 
-    configureAudit({
+    initGlobalAudit({
       serviceName: 'recipes-api',
       environment: 'development',
       transports: [transport]
@@ -67,7 +82,7 @@ describe('record', () => {
       }
     };
 
-    configureAudit({
+    initGlobalAudit({
       serviceName: 'recipes-api',
       serviceVersion: '1.2.3',
       environment: 'staging',
@@ -119,7 +134,7 @@ describe('record', () => {
   it('works outside any request context', () => {
     const { events, transport } = createCapturingTransport();
 
-    configureAudit({
+    initGlobalAudit({
       serviceName: 'jobs-api',
       environment: 'production',
       transports: [transport]
@@ -152,7 +167,7 @@ describe('record', () => {
       .mockImplementation(() => true);
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
-    configureAudit({
+    initGlobalAudit({
       serviceName: 'recipes-api',
       environment: 'development'
     });
@@ -166,17 +181,57 @@ describe('record', () => {
     expect(stdoutWrite).toHaveBeenCalledTimes(1);
   });
 
+  it('creates independent audit instances that do not share service or transports', () => {
+    const first = createCapturingTransport();
+    const second = createCapturingTransport();
+    const recipesAudit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [first.transport]
+    });
+    const billingAudit = createAudit({
+      serviceName: 'billing-api',
+      environment: 'production',
+      transports: [second.transport]
+    });
+
+    recipesAudit.record({
+      eventType: 'business',
+      eventName: 'recipe.updated'
+    });
+    billingAudit.record({
+      eventType: 'system',
+      eventName: 'invoice.synced'
+    });
+
+    expect(first.events).toHaveLength(1);
+    expect(second.events).toHaveLength(1);
+    expect(first.events[0]).toMatchObject({
+      eventName: 'recipe.updated',
+      service: {
+        name: 'recipes-api',
+        environment: 'development'
+      }
+    });
+    expect(second.events[0]).toMatchObject({
+      eventName: 'invoice.synced',
+      service: {
+        name: 'billing-api',
+        environment: 'production'
+      }
+    });
+  });
+
   it('sends the same event to every configured transport', () => {
     const first = createCapturingTransport();
     const second = createCapturingTransport();
-
-    configureAudit({
+    const audit = createAudit({
       serviceName: 'recipes-api',
       environment: 'development',
       transports: [first.transport, second.transport]
     });
 
-    record({
+    audit.record({
       eventType: 'business',
       eventName: 'recipe.updated'
     });
@@ -188,8 +243,7 @@ describe('record', () => {
 
   it('isolates synchronous transport failures from other transports', () => {
     const working = createCapturingTransport();
-
-    configureAudit({
+    const audit = createAudit({
       serviceName: 'recipes-api',
       environment: 'development',
       transports: [
@@ -203,7 +257,7 @@ describe('record', () => {
     });
 
     expect(() => {
-      record({
+      audit.record({
         eventType: 'business',
         eventName: 'recipe.updated'
       });
@@ -214,8 +268,7 @@ describe('record', () => {
 
   it('isolates asynchronous transport rejections from other transports', async () => {
     const working = createCapturingTransport();
-
-    configureAudit({
+    const audit = createAudit({
       serviceName: 'recipes-api',
       environment: 'development',
       transports: [
@@ -229,7 +282,7 @@ describe('record', () => {
     });
 
     expect(() => {
-      record({
+      audit.record({
         eventType: 'business',
         eventName: 'recipe.updated'
       });
@@ -240,7 +293,7 @@ describe('record', () => {
   });
 
   it('does not throw when configured with an empty transports array', () => {
-    configureAudit({
+    initGlobalAudit({
       serviceName: 'recipes-api',
       environment: 'development',
       transports: []
@@ -255,7 +308,7 @@ describe('record', () => {
   });
 
   it('does not propagate synchronous transport failures', () => {
-    configureAudit({
+    initGlobalAudit({
       serviceName: 'recipes-api',
       environment: 'development',
       transports: [
@@ -276,7 +329,7 @@ describe('record', () => {
   });
 
   it('does not propagate asynchronous transport rejections', async () => {
-    configureAudit({
+    initGlobalAudit({
       serviceName: 'recipes-api',
       environment: 'development',
       transports: [
@@ -297,15 +350,121 @@ describe('record', () => {
 
     await Promise.resolve();
   });
+
+  it('resetGlobalAudit clears the global singleton state between tests', () => {
+    const { events, transport } = createCapturingTransport();
+
+    initGlobalAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    record({
+      eventType: 'business',
+      eventName: 'recipe.updated'
+    });
+    resetGlobalAudit();
+    record({
+      eventType: 'business',
+      eventName: 'recipe.deleted'
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.eventName).toBe('recipe.updated');
+  });
+
+  it('drains pending FileTransport writes on instance shutdown', async () => {
+    const filePath = await createTempFilePath('events.jsonl');
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [new FileTransport({ path: filePath })]
+    });
+
+    audit.record({
+      eventType: 'business',
+      eventName: 'recipe.created',
+      payload: { index: 1 }
+    });
+    audit.record({
+      eventType: 'business',
+      eventName: 'recipe.updated',
+      payload: { index: 2 }
+    });
+
+    await audit.shutdown();
+    await audit.shutdown();
+
+    const lines = (await readFile(filePath, 'utf8')).trimEnd().split('\n');
+    expect(lines).toHaveLength(2);
+    expect(JSON.parse(lines[0] ?? '')).toMatchObject({
+      eventName: 'recipe.created',
+      payload: { index: 1 }
+    });
+    expect(JSON.parse(lines[1] ?? '')).toMatchObject({
+      eventName: 'recipe.updated',
+      payload: { index: 2 }
+    });
+  });
+
+  it('shutdownGlobalAudit is safe with transports that do not implement close', async () => {
+    initGlobalAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [createCapturingTransport().transport]
+    });
+
+    await expect(shutdownGlobalAudit()).resolves.toBeUndefined();
+    await expect(shutdownGlobalAudit()).resolves.toBeUndefined();
+  });
 });
 
-describe('configureAudit', () => {
+describe('initGlobalAudit', () => {
   it('rejects invalid environments', () => {
     expect(() => {
-      configureAudit({
+      initGlobalAudit({
         serviceName: 'recipes-api',
         environment: 'invalid' as Environment
       });
     }).toThrow('[mapa-audit] invalid environment "invalid"');
   });
+
+  it('returns undefined global audit info before initialization', () => {
+    expect(getGlobalAudit()).toBeUndefined();
+  });
+
+  it('returns an inspection view after global initialization', () => {
+    const first = createCapturingTransport();
+    const second = createCapturingTransport();
+
+    initGlobalAudit({
+      serviceName: 'recipes-api',
+      environment: 'staging',
+      transports: [first.transport, second.transport]
+    });
+
+    const info = getGlobalAudit();
+
+    expect(info).toEqual({
+      configured: true,
+      serviceName: 'recipes-api',
+      environment: 'staging',
+      transportCount: 2
+    });
+    expect(Object.hasOwn(info ?? {}, 'shutdown')).toBe(false);
+    expect(Object.hasOwn(info ?? {}, 'record')).toBe(false);
+    expect(Object.hasOwn(info ?? {}, 'transports')).toBe(false);
+
+    (info as { serviceName: string }).serviceName = 'mutated';
+
+    expect(getGlobalAudit()?.serviceName).toBe('recipes-api');
+  });
 });
+
+async function createTempFilePath(fileName: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'mapa-audit-'));
+  tempDirs.push(dir);
+
+  return join(dir, fileName);
+}

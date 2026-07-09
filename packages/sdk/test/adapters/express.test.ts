@@ -1,8 +1,11 @@
 import type { Request, Response } from 'express';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { AuditEvent } from '@tnet06/mapa-audit-types';
 import { expressAdapter } from '../../src/adapters/express.js';
-import { configureAudit } from '../../src/core/configure.js';
+import {
+  initGlobalAudit,
+  resetGlobalAudit
+} from '../../src/core/global-audit.js';
 import { getContext } from '../../src/core/storage.js';
 import { record } from '../../src/core/record.js';
 import type { Transport } from '../../src/core/transport.js';
@@ -73,6 +76,10 @@ function createCapturingTransport(): {
 }
 
 describe('expressAdapter', () => {
+  afterEach(() => {
+    resetGlobalAudit();
+  });
+
   it('sets request context for the next middleware', () => {
     const middleware = expressAdapter();
     const request = createRequest({
@@ -148,7 +155,7 @@ describe('expressAdapter', () => {
   it('lets record() use context captured by the adapter', () => {
     const { events, transport } = createCapturingTransport();
 
-    configureAudit({
+    initGlobalAudit({
       serviceName: 'recipes-api',
       environment: 'development',
       transports: [transport]

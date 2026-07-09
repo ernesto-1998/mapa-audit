@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { AuditEvent } from '@tnet06/mapa-audit-types';
-import { getConfiguredService, getConfiguredTransports } from './configure.js';
+import { recordGlobal } from './global-audit.js';
 import { getContext } from './storage.js';
+import type { Transport } from './transport.js';
 
 export interface RecordInput {
   eventType: AuditEvent['eventType'];
@@ -13,14 +14,16 @@ export interface RecordInput {
 }
 
 export function record(input: RecordInput): void {
-  const service = getConfiguredService();
+  recordGlobal(input);
+}
 
-  if (service === undefined) {
-    return;
-  }
-
+export function buildAuditEvent(
+  input: RecordInput,
+  service: AuditEvent['service']
+): AuditEvent {
   const ctx = getContext();
-  const event: AuditEvent = {
+
+  return {
     id: randomUUID(),
     ...(ctx?.correlationId === undefined
       ? {}
@@ -35,20 +38,23 @@ export function record(input: RecordInput): void {
     ...(ctx?.request === undefined ? {} : { request: ctx.request }),
     ...(ctx?.actor === undefined ? {} : { actor: ctx.actor }),
     ...(input.entity === undefined ? {} : { entity: input.entity }),
-    payload: input.payload ?? {}
+    payload: input.payload ?? Object.freeze({})
   };
+}
 
-  for (const transport of getConfiguredTransports()) {
-    try {
-      const result = transport.send(event);
+export function sendFireAndForget(
+  transport: Transport,
+  event: AuditEvent
+): void {
+  try {
+    const result = transport.send(event);
 
-      if (result instanceof Promise) {
-        result.catch((error: unknown) => {
-          void error;
-        });
-      }
-    } catch (error: unknown) {
-      void error;
+    if (result instanceof Promise) {
+      result.catch((error: unknown) => {
+        void error;
+      });
     }
+  } catch (error: unknown) {
+    void error;
   }
 }

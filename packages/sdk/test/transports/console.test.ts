@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AuditEvent } from '@tnet06/mapa-audit-types';
-import { configureAudit } from '../../src/core/configure.js';
+import {
+  initGlobalAudit,
+  resetGlobalAudit
+} from '../../src/core/global-audit.js';
 import { record } from '../../src/core/record.js';
 import { ConsoleTransport } from '../../src/transports/console.js';
 
@@ -41,6 +44,7 @@ const event: AuditEvent = {
 describe('ConsoleTransport', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    resetGlobalAudit();
   });
 
   it('writes info events to stdout as single-line JSON', () => {
@@ -114,13 +118,13 @@ describe('ConsoleTransport', () => {
     expect(Object.hasOwn(parsed, 'request_httpMethod')).toBe(false);
   });
 
-  it('is used as the default transport by configureAudit', () => {
+  it('is used as the default transport by initGlobalAudit', () => {
     const stdoutWrite = vi
       .spyOn(process.stdout, 'write')
       .mockImplementation(() => true);
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
-    configureAudit({
+    initGlobalAudit({
       serviceName: 'recipes-api',
       environment: 'development'
     });

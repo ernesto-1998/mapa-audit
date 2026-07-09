@@ -30,6 +30,10 @@ export class FileTransport implements Transport {
     return write;
   }
 
+  async close(): Promise<void> {
+    await this.#pendingWrite;
+  }
+
   async #writeEvent(event: AuditEvent): Promise<void> {
     await mkdir(dirname(this.#path), { recursive: true });
 
