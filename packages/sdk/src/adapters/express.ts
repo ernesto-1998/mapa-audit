@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, RequestHandler } from 'express';
+import type { ActorType } from '@tnet06/mapa-audit-types';
 import { contextStore, type RequestContext } from '../core/storage.js';
+
+const authenticatedActorType: ActorType = 'user';
 
 type RequestWithOptionalUser = Request & {
   user?: {
@@ -51,6 +54,7 @@ function getActor(
   }
 
   return {
+    type: authenticatedActorType,
     ...(userId === undefined ? {} : { userId }),
     ...(userRole === undefined ? {} : { userRole })
   };

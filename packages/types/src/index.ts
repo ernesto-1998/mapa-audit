@@ -32,14 +32,14 @@ export const environments = ['development', 'staging', 'production'] as const;
 export type Environment = (typeof environments)[number];
 
 export interface AuditEvent {
-  id: string;
+  readonly id: string;
   correlationId?: string;
   causationId?: string;
   eventType: EventType;
   eventName: string;
   severity: EventSeverity;
   outcome?: EventOutcome;
-  occurredAt: string;
+  readonly occurredAt: string;
   payloadSchemaVersion?: number;
   service: {
     name: string;

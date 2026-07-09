@@ -106,6 +106,7 @@ describe('expressAdapter', () => {
           userAgent: 'vitest'
         },
         actor: {
+          type: 'user',
           userId: 'user-1',
           userRole: 'admin'
         }
@@ -205,6 +206,7 @@ describe('expressAdapter', () => {
         userAgent: 'vitest'
       },
       actor: {
+        type: 'user',
         userId: 'user-1',
         userRole: 'editor'
       }
