@@ -1,7 +1,19 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+
+  return {
+    ...actual,
+    appendFile: vi.fn(actual.appendFile),
+    mkdir: vi.fn(actual.mkdir)
+  };
+});
+
+import * as fs from 'node:fs/promises';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
 import type { AuditEvent } from '@tnet06/mapa-audit-types';
 import { AUDIT_EVENT_CSV_COLUMNS } from '../../src/core/flatten.js';
 import { FileTransport } from '../../src/transports/file.js';
@@ -47,6 +59,9 @@ const fullEvent: AuditEvent = {
 };
 
 afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.mocked(fs.appendFile).mockClear();
+  vi.mocked(fs.mkdir).mockClear();
   await Promise.all(
     tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))
   );
@@ -71,6 +86,17 @@ describe('FileTransport', () => {
     expect(JSON.parse(lines[1] ?? '')).toEqual(secondEvent);
   });
 
+  it('creates the destination directory only once for repeated sends', async () => {
+    const filePath = await createTempFilePath('events.jsonl');
+    const transport = new FileTransport({ path: filePath });
+
+    await transport.send(fullEvent);
+    await transport.send({ ...fullEvent, id: 'event-2' });
+    await transport.send({ ...fullEvent, id: 'event-3' });
+
+    expect(fs.mkdir).toHaveBeenCalledTimes(1);
+  });
+
   it('writes the canonical CSV header once for a new file', async () => {
     const filePath = await createTempFilePath('events.csv');
     const firstTransport = new FileTransport({ path: filePath, format: 'csv' });
@@ -87,6 +113,28 @@ describe('FileTransport', () => {
     expect(rows[0]).toEqual([...AUDIT_EVENT_CSV_COLUMNS]);
     expect(rows[1]?.[0]).toBe('event-1');
     expect(rows[2]?.[0]).toBe('event-2');
+  });
+
+  it('writes one CSV header for concurrent sends in the same instance', async () => {
+    const filePath = await createTempFilePath('concurrent.csv');
+    const transport = new FileTransport({ path: filePath, format: 'csv' });
+
+    await Promise.all([
+      transport.send(fullEvent),
+      transport.send({ ...fullEvent, id: 'event-2' }),
+      transport.send({ ...fullEvent, id: 'event-3' })
+    ]);
+
+    const rows = parseCsv(await readFile(filePath, 'utf8'));
+    const headerCount = rows.filter((row) =>
+      arraysEqual(row, [...AUDIT_EVENT_CSV_COLUMNS])
+    ).length;
+
+    expect(rows).toHaveLength(4);
+    expect(headerCount).toBe(1);
+    expect(rows[1]?.[0]).toBe('event-1');
+    expect(rows[2]?.[0]).toBe('event-2');
+    expect(rows[3]?.[0]).toBe('event-3');
   });
 
   it('leaves CSV cells empty for absent optional fields', async () => {
@@ -154,6 +202,23 @@ describe('FileTransport', () => {
       '2026-07-05T00:00:00.000Z [business/info] recipe.updated correlationId=correlation-1 outcome=success\n'
     );
   });
+
+  it('emits a warning and resolves send when a write fails', async () => {
+    const filePath = await createTempFilePath('events.jsonl');
+    const transport = new FileTransport({ path: filePath });
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => true);
+
+    vi.mocked(fs.appendFile).mockRejectedValueOnce(new Error('disk full'));
+
+    await expect(transport.send(fullEvent)).resolves.toBeUndefined();
+
+    expect(emitWarning).toHaveBeenCalledTimes(1);
+    expect(emitWarning).toHaveBeenCalledWith(
+      '[mapa-audit] file transport write failed: disk full'
+    );
+  });
 });
 
 async function createTempFilePath(fileName: string): Promise<string> {
@@ -169,6 +234,16 @@ function cell(
   column: string
 ): string | undefined {
   return row?.[header?.indexOf(column) ?? -1];
+}
+
+function arraysEqual(
+  left: readonly string[],
+  right: readonly string[]
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
 }
 
 function parseCsv(content: string): string[][] {
