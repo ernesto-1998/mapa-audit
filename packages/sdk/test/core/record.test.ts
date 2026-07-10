@@ -19,6 +19,10 @@ const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const missingGlobalAuditWarning =
   '[mapa-audit] record() called before initGlobalAudit() - events are being discarded. Call initGlobalAudit() at startup, or use createAudit() for an explicit instance.';
+const syncTransportWarning =
+  '[mapa-audit] transport send failed: transport failed';
+const asyncTransportWarning =
+  '[mapa-audit] transport send failed: transport rejected';
 const tempDirs: string[] = [];
 
 function createCapturingTransport(): {
@@ -244,6 +248,9 @@ describe('record', () => {
   });
 
   it('isolates synchronous transport failures from other transports', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
     const working = createCapturingTransport();
     const audit = createAudit({
       serviceName: 'recipes-api',
@@ -266,9 +273,13 @@ describe('record', () => {
     }).not.toThrow();
 
     expect(working.events).toHaveLength(1);
+    expect(emitWarning).toHaveBeenCalledWith(syncTransportWarning);
   });
 
   it('isolates asynchronous transport rejections from other transports', async () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
     const working = createCapturingTransport();
     const audit = createAudit({
       serviceName: 'recipes-api',
@@ -292,6 +303,9 @@ describe('record', () => {
 
     await Promise.resolve();
     expect(working.events).toHaveLength(1);
+    await vi.waitFor(() => {
+      expect(emitWarning).toHaveBeenCalledWith(asyncTransportWarning);
+    });
   });
 
   it('does not throw when configured with an empty transports array', () => {
@@ -370,6 +384,10 @@ describe('record', () => {
   });
 
   it('does not propagate synchronous transport failures', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+
     initGlobalAudit({
       serviceName: 'recipes-api',
       environment: 'development',
@@ -388,9 +406,14 @@ describe('record', () => {
         eventName: 'recipe.updated'
       });
     }).not.toThrow();
+    expect(emitWarning).toHaveBeenCalledWith(syncTransportWarning);
   });
 
   it('does not propagate asynchronous transport rejections', async () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+
     initGlobalAudit({
       serviceName: 'recipes-api',
       environment: 'development',
@@ -411,6 +434,9 @@ describe('record', () => {
     }).not.toThrow();
 
     await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(emitWarning).toHaveBeenCalledWith(asyncTransportWarning);
+    });
   });
 
   it('resetGlobalAudit clears the global singleton state between tests', () => {

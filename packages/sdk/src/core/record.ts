@@ -3,6 +3,7 @@ import type { AuditEvent } from '@tnet06/mapa-audit-types';
 import { recordGlobal } from './global-audit.js';
 import { getContext } from './storage.js';
 import type { Transport } from './transport.js';
+import { emitAuditWarning, errorMessage } from './warnings.js';
 
 export interface RecordInput {
   eventType: AuditEvent['eventType'];
@@ -51,10 +52,14 @@ export function sendFireAndForget(
 
     if (result instanceof Promise) {
       result.catch((error: unknown) => {
-        void error;
+        emitTransportWarning(error);
       });
     }
   } catch (error: unknown) {
-    void error;
+    emitTransportWarning(error);
   }
+}
+
+function emitTransportWarning(error: unknown): void {
+  emitAuditWarning(`transport send failed: ${errorMessage(error)}`);
 }

@@ -7,6 +7,7 @@ import {
   type AuditEventCsvColumn
 } from '../core/flatten.js';
 import type { Transport } from '../core/transport.js';
+import { emitAuditWarning, errorMessage } from '../core/warnings.js';
 
 export interface FileTransportOptions {
   path: string;
@@ -132,13 +133,7 @@ function isNodeErrorWithCode(
 }
 
 function emitWriteWarning(error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
-
-  try {
-    process.emitWarning(`[mapa-audit] file transport write failed: ${message}`);
-  } catch (warningError: unknown) {
-    void warningError;
-  }
+  emitAuditWarning(`file transport write failed: ${errorMessage(error)}`);
 }
 
 export type { AuditEventCsvColumn };
