@@ -167,6 +167,148 @@ describe('record', () => {
     expect(events[0]?.correlationId).toBeUndefined();
   });
 
+  it('masks configured top-level payload fields without changing other fields', () => {
+    const { events, transport } = createCapturingTransport();
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport],
+      maskedFields: ['creditCard']
+    });
+
+    audit.record({
+      eventType: 'business',
+      eventName: 'payment.created',
+      payload: {
+        creditCard: '4111111111111111',
+        amount: 42
+      }
+    });
+
+    expect(events[0]?.payload).toEqual({
+      creditCard: '***',
+      amount: 42
+    });
+  });
+
+  it('leaves payload unchanged when maskedFields is not configured', () => {
+    const { events, transport } = createCapturingTransport();
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    audit.record({
+      eventType: 'business',
+      eventName: 'payment.created',
+      payload: {
+        creditCard: '4111111111111111',
+        amount: 42
+      }
+    });
+
+    expect(events[0]?.payload).toEqual({
+      creditCard: '4111111111111111',
+      amount: 42
+    });
+  });
+
+  it('does not mutate the original payload object when masking fields', () => {
+    const { events, transport } = createCapturingTransport();
+    const originalPayload = {
+      password: 'secret',
+      username: 'ada'
+    };
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport],
+      maskedFields: ['password']
+    });
+
+    audit.record({
+      eventType: 'security',
+      eventName: 'login.attempted',
+      payload: originalPayload
+    });
+
+    expect(originalPayload).toEqual({
+      password: 'secret',
+      username: 'ada'
+    });
+    expect(events[0]?.payload).toEqual({
+      password: '***',
+      username: 'ada'
+    });
+  });
+
+  it('replaces payload with a truncation marker when it exceeds maxPayloadSize', () => {
+    const { events, transport } = createCapturingTransport();
+    const payload = {
+      message: 'this payload is too large'
+    };
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport],
+      maxPayloadSize: 10
+    });
+
+    audit.record({
+      eventType: 'business',
+      eventName: 'payload.large',
+      payload
+    });
+
+    expect(events[0]?.payload).toEqual({
+      truncated: true,
+      originalSizeBytes: Buffer.byteLength(JSON.stringify(payload), 'utf8'),
+      maxSizeBytes: 10
+    });
+  });
+
+  it('keeps payload intact when it does not exceed maxPayloadSize', () => {
+    const { events, transport } = createCapturingTransport();
+    const payload = {
+      ok: true
+    };
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport],
+      maxPayloadSize: 1_000
+    });
+
+    audit.record({
+      eventType: 'business',
+      eventName: 'payload.small',
+      payload
+    });
+
+    expect(events[0]?.payload).toEqual(payload);
+  });
+
+  it('uses the default maxPayloadSize for normal payloads', () => {
+    const { events, transport } = createCapturingTransport();
+    const payload = {
+      changedFields: ['title']
+    };
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    audit.record({
+      eventType: 'business',
+      eventName: 'payload.default-limit',
+      payload
+    });
+
+    expect(events[0]?.payload).toEqual(payload);
+  });
+
   it('uses the default console transport when no transports are configured', () => {
     const stdoutWrite = vi
       .spyOn(process.stdout, 'write')

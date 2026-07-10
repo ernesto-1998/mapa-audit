@@ -14,15 +14,24 @@ export interface RecordInput {
   payload?: NonNullable<AuditEvent['payload']>;
 }
 
+export interface PayloadOptions {
+  maskedFields?: string[];
+  maxPayloadSize?: number;
+}
+
+const defaultMaxPayloadSize = 1_000_000;
+
 export function record(input: RecordInput): void {
   recordGlobal(input);
 }
 
 export function buildAuditEvent(
   input: RecordInput,
-  service: AuditEvent['service']
+  service: AuditEvent['service'],
+  payloadOptions: PayloadOptions = {}
 ): AuditEvent {
   const ctx = getContext();
+  const payload = preparePayload(input.payload, payloadOptions);
 
   return {
     id: randomUUID(),
@@ -39,7 +48,7 @@ export function buildAuditEvent(
     ...(ctx?.request === undefined ? {} : { request: ctx.request }),
     ...(ctx?.actor === undefined ? {} : { actor: ctx.actor }),
     ...(input.entity === undefined ? {} : { entity: input.entity }),
-    payload: input.payload ?? Object.freeze({})
+    payload
   };
 }
 
@@ -62,4 +71,46 @@ export function sendFireAndForget(
 
 function emitTransportWarning(error: unknown): void {
   emitAuditWarning(`transport send failed: ${errorMessage(error)}`);
+}
+
+function preparePayload(
+  payload: NonNullable<AuditEvent['payload']> | undefined,
+  options: PayloadOptions
+): NonNullable<AuditEvent['payload']> {
+  const maskedPayload = maskPayload(payload ?? Object.freeze({}), options);
+  const maxPayloadSize = options.maxPayloadSize ?? defaultMaxPayloadSize;
+  const originalSizeBytes = Buffer.byteLength(
+    JSON.stringify(maskedPayload),
+    'utf8'
+  );
+
+  if (originalSizeBytes <= maxPayloadSize) {
+    return maskedPayload;
+  }
+
+  return {
+    truncated: true,
+    originalSizeBytes,
+    maxSizeBytes: maxPayloadSize
+  };
+}
+
+function maskPayload(
+  payload: NonNullable<AuditEvent['payload']>,
+  options: PayloadOptions
+): NonNullable<AuditEvent['payload']> {
+  if (options.maskedFields === undefined || options.maskedFields.length === 0) {
+    return payload;
+  }
+
+  const maskedFields = new Set(options.maskedFields);
+  const maskedPayload: NonNullable<AuditEvent['payload']> = { ...payload };
+
+  for (const field of maskedFields) {
+    if (Object.hasOwn(maskedPayload, field)) {
+      maskedPayload[field] = '***';
+    }
+  }
+
+  return maskedPayload;
 }

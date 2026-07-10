@@ -7,6 +7,7 @@ import { ConsoleTransport } from '../transports/console.js';
 import {
   buildAuditEvent,
   sendFireAndForget,
+  type PayloadOptions,
   type RecordInput
 } from './record.js';
 import type { Transport } from './transport.js';
@@ -16,6 +17,8 @@ export interface AuditConfig {
   serviceVersion?: string;
   environment: Environment;
   transports?: Transport[];
+  maskedFields?: string[];
+  maxPayloadSize?: number;
 }
 
 export interface AuditInstance {
@@ -46,6 +49,14 @@ export function createAudit(config: AuditConfig): AuditInstance {
     environment: config.environment
   };
   const transports: Transport[] = config.transports ?? [new ConsoleTransport()];
+  const payloadOptions: PayloadOptions = {
+    ...(config.maskedFields === undefined
+      ? {}
+      : { maskedFields: config.maskedFields }),
+    ...(config.maxPayloadSize === undefined
+      ? {}
+      : { maxPayloadSize: config.maxPayloadSize })
+  };
   let isShutdown = false;
   let shutdownPromise: Promise<void> | undefined;
 
@@ -55,7 +66,7 @@ export function createAudit(config: AuditConfig): AuditInstance {
         return;
       }
 
-      const event = buildAuditEvent(input, service);
+      const event = buildAuditEvent(input, service, payloadOptions);
 
       for (const transport of transports) {
         sendFireAndForget(transport, event);
