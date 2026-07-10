@@ -32,6 +32,8 @@ const defaultMaxPayloadSize = 1_000_000;
  * Records one event through the global audit singleton.
  *
  * Call `initGlobalAudit()` during application startup before using this helper.
+ * This global path is recommended for the simple case: one audit configuration
+ * per process, typically a single app/service initialized once at startup.
  * If it is called before initialization, the event is discarded and a warning is
  * emitted once for the process.
  *

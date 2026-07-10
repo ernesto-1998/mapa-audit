@@ -87,9 +87,9 @@ export interface GlobalAuditInfo {
 /**
  * Creates an isolated audit client with its own configuration.
  *
- * Prefer this for tests, multi-tenant apps, or any process that needs multiple
- * independent audit configurations. Use `initGlobalAudit()` for the simpler
- * singleton API.
+ * This is recommended when multiple isolated configurations are needed in the
+ * same process, such as tests with independent state, multi-tenant scenarios, or
+ * any case where one global configuration is not enough.
  *
  * @param config Service metadata, transports, and payload safety options.
  * @returns An independent audit instance.

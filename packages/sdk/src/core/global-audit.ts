@@ -14,6 +14,8 @@ let hasWarnedMissingConfig = false;
  *
  * This creates an internal `AuditInstance` via `createAudit()`. Call it once at
  * application startup before using the global `record()` helper.
+ * Use this global path for the simple case: one audit configuration per process,
+ * typically a single app/service initialized once at startup.
  *
  * @param config Service metadata, transports, and payload safety options.
  */
