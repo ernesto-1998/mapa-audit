@@ -9,11 +9,33 @@ import {
 import type { Transport } from '../core/transport.js';
 import { emitAuditWarning, errorMessage } from '../core/warnings.js';
 
+/** Options for `FileTransport`. */
 export interface FileTransportOptions {
+  /** Destination file path. Parent directories are created automatically. */
   path: string;
+  /**
+   * File output format.
+   *
+   * - `jsonl`: default. Writes one nested JSON event per line.
+   * - `csv`: writes fixed canonical columns, flattening known event groups.
+   * - `text`: writes one compact human-readable line per event.
+   *
+   * @default "jsonl"
+   */
   format?: 'jsonl' | 'csv' | 'text';
 }
 
+/**
+ * Transport that appends audit events to a local file.
+ *
+ * `jsonl` preserves the nested event. `csv` uses the shared flatten helper and a
+ * fixed header. `text` includes occurredAt, event type, severity, event name,
+ * correlationId, and outcome when available.
+ *
+ * CSV header coordination is safe within one `FileTransport` instance/process.
+ * Multiple processes writing to the same file concurrently are not coordinated;
+ * use process-level file locking outside the SDK if that is required.
+ */
 export class FileTransport implements Transport {
   readonly #path: string;
   readonly #format: NonNullable<FileTransportOptions['format']>;
@@ -21,11 +43,18 @@ export class FileTransport implements Transport {
   #directoryReady: Promise<void> | undefined;
   #headerWritten = false;
 
+  /** Creates a file transport using the selected append-only output format. */
   constructor(options: FileTransportOptions) {
     this.#path = options.path;
     this.#format = options.format ?? 'jsonl';
   }
 
+  /**
+   * Queues one append operation.
+   *
+   * Writes are serialized per instance. Failures are emitted as mapa-audit
+   * warnings and are not thrown into host application code.
+   */
   send(event: AuditEvent): Promise<void> {
     const write = this.#pendingWrite.then(() => this.#writeEvent(event));
     const handledWrite = write.catch((error: unknown) => {
@@ -37,6 +66,7 @@ export class FileTransport implements Transport {
     return handledWrite;
   }
 
+  /** Waits until all queued file writes have completed. */
   async close(): Promise<void> {
     await this.#pendingWrite;
   }

@@ -9,6 +9,14 @@ import type { RecordInput } from './record.js';
 let globalAudit: AuditInstance | undefined;
 let hasWarnedMissingConfig = false;
 
+/**
+ * Initializes the convenience global audit singleton.
+ *
+ * This creates an internal `AuditInstance` via `createAudit()`. Call it once at
+ * application startup before using the global `record()` helper.
+ *
+ * @param config Service metadata, transports, and payload safety options.
+ */
 export function initGlobalAudit(config: AuditConfig): void {
   globalAudit = createAudit(config);
 }
@@ -22,15 +30,31 @@ export function recordGlobal(input: RecordInput): void {
   globalAudit.record(input);
 }
 
+/**
+ * Drains the global audit singleton if it has been initialized.
+ *
+ * Safe to call even when no global audit instance exists.
+ */
 export async function shutdownGlobalAudit(): Promise<void> {
   await globalAudit?.shutdown();
 }
 
+/**
+ * Clears the global singleton and its one-time warning state.
+ *
+ * Intended for tests or controlled reinitialization in development.
+ */
 export function resetGlobalAudit(): void {
   globalAudit = undefined;
   hasWarnedMissingConfig = false;
 }
 
+/**
+ * Returns a read-only inspection view of the global audit singleton.
+ *
+ * The returned object contains only metadata such as service name, environment,
+ * and transport count. It does not expose transports or mutating methods.
+ */
 export function getGlobalAudit(): GlobalAuditInfo | undefined {
   return globalAudit?.getInfo();
 }

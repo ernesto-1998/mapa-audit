@@ -5,12 +5,19 @@ import { getContext } from './storage.js';
 import type { Transport } from './transport.js';
 import { emitAuditWarning, errorMessage } from './warnings.js';
 
+/** Input accepted by `record()` and `AuditInstance.record()`. */
 export interface RecordInput {
+  /** Event domain/category, such as `business`, `audit`, or `security`. */
   eventType: AuditEvent['eventType'];
+  /** Application-defined event name, for example `user.created`. */
   eventName: string;
+  /** Event severity. Defaults to `info` when omitted. */
   severity?: AuditEvent['severity'];
+  /** Optional result of the operation being recorded. */
   outcome?: AuditEvent['outcome'];
+  /** Optional entity affected by the event. */
   entity?: NonNullable<AuditEvent['entity']>;
+  /** Optional custom event payload. Payload safety rules run before dispatch. */
   payload?: NonNullable<AuditEvent['payload']>;
 }
 
@@ -21,6 +28,15 @@ export interface PayloadOptions {
 
 const defaultMaxPayloadSize = 1_000_000;
 
+/**
+ * Records one event through the global audit singleton.
+ *
+ * Call `initGlobalAudit()` during application startup before using this helper.
+ * If it is called before initialization, the event is discarded and a warning is
+ * emitted once for the process.
+ *
+ * @param input Event fields supplied by the caller.
+ */
 export function record(input: RecordInput): void {
   recordGlobal(input);
 }
