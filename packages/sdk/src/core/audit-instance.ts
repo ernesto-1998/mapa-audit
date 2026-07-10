@@ -17,6 +17,10 @@ export interface AuditConfig {
   serviceVersion?: string;
   environment: Environment;
   transports?: Transport[];
+  /**
+   * Dot-notation payload paths to mask before dispatching events.
+   * Array indexing is not supported in this version.
+   */
   maskedFields?: string[];
   maxPayloadSize?: number;
 }

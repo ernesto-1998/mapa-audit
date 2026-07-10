@@ -191,6 +191,132 @@ describe('record', () => {
     });
   });
 
+  it('masks second-level payload paths with dot notation', () => {
+    const { events, transport } = createCapturingTransport();
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport],
+      maskedFields: ['user.ssn']
+    });
+
+    audit.record({
+      eventType: 'business',
+      eventName: 'user.updated',
+      payload: {
+        user: {
+          ssn: '123-45-6789',
+          name: 'Ada'
+        }
+      }
+    });
+
+    expect(events[0]?.payload).toEqual({
+      user: {
+        ssn: '***',
+        name: 'Ada'
+      }
+    });
+  });
+
+  it('masks third-level payload paths with dot notation', () => {
+    const { events, transport } = createCapturingTransport();
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport],
+      maskedFields: ['payment.card.cvv']
+    });
+
+    audit.record({
+      eventType: 'business',
+      eventName: 'payment.created',
+      payload: {
+        payment: {
+          card: {
+            cvv: '123',
+            last4: '1111'
+          },
+          amount: 42
+        }
+      }
+    });
+
+    expect(events[0]?.payload).toEqual({
+      payment: {
+        card: {
+          cvv: '***',
+          last4: '1111'
+        },
+        amount: 42
+      }
+    });
+  });
+
+  it('ignores missing masked paths without changing other payload fields', () => {
+    const { events, transport } = createCapturingTransport();
+    const payload = {
+      accountId: 'account-1'
+    };
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport],
+      maskedFields: ['user.ssn']
+    });
+
+    audit.record({
+      eventType: 'business',
+      eventName: 'account.updated',
+      payload
+    });
+
+    expect(events[0]?.payload).toEqual(payload);
+  });
+
+  it('ignores masked paths that traverse non-objects', () => {
+    const { events, transport } = createCapturingTransport();
+    const payload = {
+      a: 'string'
+    };
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport],
+      maskedFields: ['a.b']
+    });
+
+    audit.record({
+      eventType: 'business',
+      eventName: 'payload.non-object',
+      payload
+    });
+
+    expect(events[0]?.payload).toEqual(payload);
+  });
+
+  it('ignores masked paths that traverse null or arrays', () => {
+    const { events, transport } = createCapturingTransport();
+    const payload = {
+      user: null,
+      payments: [{ card: { cvv: '123' } }]
+    };
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport],
+      maskedFields: ['user.ssn', 'payments.0.card.cvv']
+    });
+
+    audit.record({
+      eventType: 'business',
+      eventName: 'payload.array',
+      payload
+    });
+
+    expect(events[0]?.payload).toEqual(payload);
+  });
+
   it('leaves payload unchanged when maskedFields is not configured', () => {
     const { events, transport } = createCapturingTransport();
     const audit = createAudit({
@@ -217,14 +343,16 @@ describe('record', () => {
   it('does not mutate the original payload object when masking fields', () => {
     const { events, transport } = createCapturingTransport();
     const originalPayload = {
-      password: 'secret',
-      username: 'ada'
+      user: {
+        ssn: '123-45-6789',
+        name: 'Ada'
+      }
     };
     const audit = createAudit({
       serviceName: 'recipes-api',
       environment: 'development',
       transports: [transport],
-      maskedFields: ['password']
+      maskedFields: ['user.ssn']
     });
 
     audit.record({
@@ -234,13 +362,65 @@ describe('record', () => {
     });
 
     expect(originalPayload).toEqual({
-      password: 'secret',
-      username: 'ada'
+      user: {
+        ssn: '123-45-6789',
+        name: 'Ada'
+      }
     });
     expect(events[0]?.payload).toEqual({
-      password: '***',
-      username: 'ada'
+      user: {
+        ssn: '***',
+        name: 'Ada'
+      }
     });
+  });
+
+  it('handles overlapping masked paths without throwing', () => {
+    const { events, transport } = createCapturingTransport();
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport],
+      maskedFields: ['user', 'user.ssn']
+    });
+
+    expect(() => {
+      audit.record({
+        eventType: 'business',
+        eventName: 'user.updated',
+        payload: {
+          user: {
+            ssn: '123-45-6789',
+            name: 'Ada'
+          }
+        }
+      });
+    }).not.toThrow();
+
+    expect(events[0]?.payload).toEqual({
+      user: '***'
+    });
+  });
+
+  it('keeps the original payload reference when maskedFields is empty', () => {
+    const { events, transport } = createCapturingTransport();
+    const payload = {
+      creditCard: '4111111111111111'
+    };
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport],
+      maskedFields: []
+    });
+
+    audit.record({
+      eventType: 'business',
+      eventName: 'payment.created',
+      payload
+    });
+
+    expect(events[0]?.payload).toBe(payload);
   });
 
   it('replaces payload with a truncation marker when it exceeds maxPayloadSize', () => {

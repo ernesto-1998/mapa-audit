@@ -103,14 +103,41 @@ function maskPayload(
     return payload;
   }
 
-  const maskedFields = new Set(options.maskedFields);
-  const maskedPayload: NonNullable<AuditEvent['payload']> = { ...payload };
+  const maskedPayload = structuredClone(payload);
 
-  for (const field of maskedFields) {
-    if (Object.hasOwn(maskedPayload, field)) {
-      maskedPayload[field] = '***';
-    }
+  for (const field of options.maskedFields) {
+    maskPath(maskedPayload, field.split('.'));
   }
 
   return maskedPayload;
+}
+
+function maskPath(target: Record<string, unknown>, segments: string[]): void {
+  if (segments.length === 0) {
+    return;
+  }
+
+  let current: unknown = target;
+
+  for (const segment of segments.slice(0, -1)) {
+    if (!isNavigableObject(current) || !Object.hasOwn(current, segment)) {
+      return;
+    }
+
+    current = current[segment];
+  }
+
+  if (!isNavigableObject(current)) {
+    return;
+  }
+
+  const lastSegment = segments.at(-1);
+
+  if (lastSegment !== undefined && Object.hasOwn(current, lastSegment)) {
+    current[lastSegment] = '***';
+  }
+}
+
+function isNavigableObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
