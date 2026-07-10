@@ -5,6 +5,7 @@
   "type": "module",
   "packageManager": "npm@10.9.3",
   "workspaces": [
+    "examples/*",
     "packages/*"
   ],
   "scripts": {

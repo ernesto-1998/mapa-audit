@@ -1,0 +1,18 @@
+{
+  "name": "@tnet06/mapa-audit-express-demo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/server.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@tnet06/mapa-audit-sdk": "0.0.0",
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6"
+  }
+}

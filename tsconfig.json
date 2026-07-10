@@ -2,6 +2,9 @@
   "files": [],
   "references": [
     {
+      "path": "./examples/express-demo"
+    },
+    {
       "path": "./packages/types"
     },
     {
