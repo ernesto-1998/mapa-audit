@@ -5,6 +5,9 @@
       "path": "./examples/express-demo"
     },
     {
+      "path": "./examples/nestjs-demo"
+    },
+    {
       "path": "./packages/types"
     },
     {
