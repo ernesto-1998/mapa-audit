@@ -1,6 +1,12 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    // Required for @Injectable() in src/adapters/nestjs.ts (NestJS's
+    // decorator-based DI). Applies to the whole package, but has no effect
+    // on files that don't use decorators — kept here rather than split into
+    // a nested tsconfig to avoid unnecessary build complexity for a single
+    // file's requirement.
+    "experimentalDecorators": true,
     "rootDir": "..",
     "noEmit": true
   },
