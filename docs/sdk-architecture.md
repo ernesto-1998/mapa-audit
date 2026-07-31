@@ -1,9 +1,16 @@
 # Audit & Business Observability Platform
-## SDK Architecture Document (Final)
+## SDK Architecture Document (Current State — v3)
 
-**Status:** Draft for review
+**Status:** Reflects the implemented SDK as of this revision
 **Audience:** Engineering
-**Companion to:** Platform Design Overview, Database Design (TimescaleDB)
+**Companion to:** Platform Design Overview (future queue module), Database Design
+(TimescaleDB, future queue module), RabbitMQ + Worker Architecture (future queue
+module)
+
+> **Superseded content notice:** this document replaces all earlier revisions.
+> Earlier drafts described a `configureAudit()`/`transport` (singular) API and a
+> `core/configure.ts` file that no longer exist. This document reflects the SDK as
+> actually implemented.
 
 ---
 
@@ -11,108 +18,154 @@
 
 This document describes the SDK that backend services use to record audit,
 business, error, and security events. The SDK's core value is **automatic,
-framework-aware capture of request context** (correlation ID, user, endpoint, IP,
-etc.) plus a **structured business-audit event model** — not log transport, which
-is a solved problem.
+framework-aware capture of request context** (correlation ID, actor, request
+metadata) plus a **structured business-audit event model with built-in data
+safety** (field masking, payload size limiting) — not log transport, which is a
+solved problem the SDK deliberately does not try to out-compete.
 
-Where events go is a **pluggable transport**: console, file, or (later) a queue
-feeding a persistence pipeline. The SDK does not compete with general-purpose
-loggers (Pino, Winston) on transport; it focuses on what they don't do — turning
-raw requests into structured, correlated, business-meaningful audit events.
+Where events go is a **pluggable transport**: console or file today; a queue
+feeding a persistence pipeline is a future, separate, opt-in module (see §10).
 
 Design priorities:
 
-- A minimal, stable public surface.
+- A minimal, stable public surface, offered in two complementary shapes: a
+  **creational API** (isolated instances) and a **global convenience API** (a
+  singleton wrapper over one creational instance) — see §2.
 - **Two independent axes:** adapters (capture, per framework) and transports
   (delivery, per destination) — neither knows about the other.
 - Zero-infrastructure default: works out of the box (console) with no queue or DB.
-- Framework-agnostic core; thin adapters per framework; thin transports per sink.
-- Client-generated event identity, preserved for the queue transport's idempotency.
+- Built-in data safety: sensitive field masking and payload size limiting, applied
+  once during event assembly, before any transport sees the event.
+- Explicit lifecycle: transports may declare a `close()` to drain pending work; the
+  SDK exposes `shutdown()` so no event is silently lost on process exit.
+- Visible failure: transport errors and misconfiguration emit `process.emitWarning`
+  instead of failing silently — while still never throwing into the host app.
 
 ---
 
-### 2. The Two-Axis Architecture (read this first)
+### 2. The Two APIs: Creational vs. Global
 
-The single most important structural idea: **capture and delivery are independent
-axes, decoupled by the core.**
+The SDK exposes two ways to get an audit client. They share **one implementation**
+— the global API is a thin wrapper over a creational instance, not a duplicate.
 
 ```
-   ADAPTERS (capture context)      CORE            TRANSPORTS (deliver event)
-   ┌──────────────┐                                ┌────────────────────┐
-   │ express       │──┐          ┌──────────┐   ┌──│ console             │
-   │ fastify       │──┤          │  record  │   ├──│ file (jsonl/csv/xlsx)│
-   │ nestjs        │──┼─────────▶│  (core)  │──▶┼──│ queue (later module) │
-   │ node (manual) │──┘          └──────────┘   └──│ (custom)            │
-   └──────────────┘                                └────────────────────┘
-        ▲                                                    ▲
-   only job: read the request        only job: send the finished event
-   and populate context              somewhere; knows nothing of frameworks
+createAudit(config) ──────────────► AuditInstance
+                                       { record(), shutdown(), getInfo() }
+                                       Isolated state (closure), no module globals.
+
+initGlobalAudit(config) ──► internally calls createAudit() and stores the
+                             resulting instance in a module-level singleton.
+record(input) ─────────────► delegates to the stored global instance.
+shutdownGlobalAudit() ──────► delegates to the stored global instance's shutdown().
+resetGlobalAudit() ─────────► clears the stored global instance (test isolation).
+getGlobalAudit() ───────────► read-only inspection view (see §2.3), never the
+                               instance itself.
 ```
 
-Consequences of this design:
+**When to use which:**
 
-- **Any adapter works with any transport.** Express→console, NestJS→file,
-  Fastify→queue — every combination works, because adapters and transports never
-  interact. They only talk to the core.
-- **Adding a transport touches no adapter**, and **adding a framework touches no
-  transport.** Each is added in isolation.
-- The RabbitMQ/DB pipeline is simply **one transport (the queue transport)**, built
-  last as a separate module — not the core of the SDK.
+- **Global (`initGlobalAudit` + `record`)** — the common case: one audit
+  configuration per process, a single app/service initialized once at startup.
+  Ergonomic — `record()` is imported and called anywhere without threading an
+  instance through call stacks. This mirrors how logging/telemetry SDKs in the
+  wider ecosystem work (e.g. Sentry's `init()` + global capture calls).
+- **Creational (`createAudit`)** — when isolated, independent configurations are
+  needed in the same process: tests with independent state, multi-tenant
+  scenarios, or any case where a single global configuration is not enough.
+
+#### 2.1 Why a global singleton, deliberately
+
+Earlier design discussion considered eliminating the global entirely in favor of a
+pure creational API. That was rejected: audit/observability is a cross-cutting
+concern used throughout a codebase, and forcing every call site to receive and
+thread an instance is worse ergonomics for the common case, with no compensating
+benefit. This mirrors established practice (Sentry, OpenTelemetry, Winston) where a
+configurable global convenience layer coexists with instance creation.
+
+#### 2.2 Why the global never mutates in place
+
+`initGlobalAudit()` is called once, at startup. There is **no** API to add/remove
+transports or change configuration on the live global instance afterward.
+Mutating shared global state at runtime is exactly the kind of unpredictability
+that makes concurrent systems hard to reason about — a `record()` call in one part
+of the app could silently behave differently depending on whether another part
+mutated the global first. If isolated, independently-controlled configuration is
+needed, use `createAudit()` instead — mutating your *own* instance is safe because
+only you hold it.
+
+`resetGlobalAudit()` is the one exception, and it is a full atomic replacement (for
+test isolation), not a partial mutation.
+
+#### 2.3 `getGlobalAudit()` — inspection, not control
+
+Returns a `GlobalAuditInfo` object (`{ configured, serviceName, environment,
+transportCount }`) — a **read-only snapshot**, not the instance itself. It never
+exposes `record()`, `shutdown()`, or the underlying transports array. This is
+"read-only by construction": the returned object has no way to affect the global
+instance, rather than relying on callers not to misuse a mutable reference.
+Returns `undefined` if the global was never initialized.
 
 ---
 
-### 3. Package Structure
+### 3. Package Structure (current)
 
 ```
 packages/sdk/
 ├── src/
 │   ├── core/
 │   │   ├── storage.ts        → AsyncLocalStorage + RequestContext
-│   │   ├── record.ts         → public record(); builds event, hands to transport
-│   │   ├── configure.ts      → init: select transport, set service metadata
-│   │   ├── transport.ts      → the Transport interface
-│   │   └── flatten.ts        → shared helper: nested event → flat row (for tabular sinks)
+│   │   ├── transport.ts      → the Transport interface (send + optional close)
+│   │   ├── audit-instance.ts → AuditConfig, AuditInstance, GlobalAuditInfo,
+│   │   │                        createAudit() — the creational factory
+│   │   ├── record.ts         → RecordInput, buildAuditEvent(), sendFireAndForget(),
+│   │   │                        payload masking/truncation, the public record()
+│   │   │                        shortcut (delegates to global-audit.ts)
+│   │   ├── global-audit.ts   → initGlobalAudit, recordGlobal, shutdownGlobalAudit,
+│   │   │                        resetGlobalAudit, getGlobalAudit — the thin global
+│   │   │                        singleton wrapper
+│   │   ├── flatten.ts        → flatten() + AUDIT_EVENT_CSV_COLUMNS (shared helper
+│   │   │                        for tabular output; canonical CSV schema)
+│   │   └── warnings.ts       → emitAuditWarning(), errorMessage() — shared,
+│   │                            reused by record.ts and transports/file.ts
 │   ├── transports/
-│   │   ├── console.ts        → ConsoleTransport (process.stdout / process.stderr)
-│   │   └── file.ts           → FileTransport (jsonl / csv / xlsx)
+│   │   ├── console.ts        → ConsoleTransport (process.stdout/stderr)
+│   │   └── file.ts           → FileTransport (jsonl/csv/text)
 │   ├── adapters/
-│   │   ├── express.ts
-│   │   ├── fastify.ts
-│   │   └── nestjs.ts
+│   │   └── express.ts        → expressAdapter(options?)
 │   └── index.ts               → public exports
 ├── package.json
-└── tsconfig.json
+└── tsconfig.json / tsconfig.build.json
 ```
 
+Note on the split between `audit-instance.ts`, `record.ts`, and `global-audit.ts`:
+these were reorganized out of a single `configure.ts` once that file had
+accumulated four unrelated responsibilities (instance creation, event assembly,
+dispatch, global singleton management). Each file now owns one responsibility;
+`configure.ts` no longer exists.
+
 Adapters and transports are exposed as **subpath exports**
-(`@tnet06/mapa-audit-sdk/nestjs`, `@tnet06/mapa-audit-sdk/transports`) so a
-consumer only pulls in what they use. The `AuditEvent` type is imported from the
-shared package `@tnet06/mapa-audit-types` (never redeclared here). The queue
-transport lives in its **own package** (see §10), not here — it carries heavier
-dependencies.
+(`@tnet06/mapa-audit-sdk/express`, `@tnet06/mapa-audit-sdk/transports`) so a
+consumer only pulls in what they use. The queue transport, when built, will live in
+its **own package** (see §10), not here.
 
 ---
 
 ### 4. Event Data Model (nested canonical form, flattened on output)
 
-This is a foundational decision that shapes every transport, so it comes before the
-core mechanics.
-
-**The event is structured as a nested object, grouped by concern.** This is the
-single canonical representation that `record()` produces and that travels to the
-transport:
+Unchanged from earlier design — this remains foundational.
 
 ```ts
-// defined in @tnet06/mapa-audit-types, imported by the SDK
+// defined in @tnet06/mapa-audit-types, imported by the SDK (never redeclared)
 interface AuditEvent {
-  id: string;                 // client-generated UUID
+  readonly id: string;                 // client-generated UUID
   correlationId?: string;
   causationId?: string;
-  eventType: string;          // 'request' | 'business' | 'error' | 'security' | 'system' | 'audit'
+  eventType: string;
   eventName: string;
-  severity: string;           // 'debug' | 'info' | 'warn' | 'error' | 'critical'
-  outcome?: string;           // 'success' | 'failure' | 'partial'
-  occurredAt: string;         // ISO timestamp
+  severity: string;
+  outcome?: string;
+  readonly occurredAt: string;         // ISO timestamp
+  payloadSchemaVersion?: number;
 
   service: {
     name: string;
@@ -121,70 +174,6 @@ interface AuditEvent {
     instanceId?: string;
   };
 
-  request?: {                 // present for HTTP-originated events
-    httpMethod?: string;
-    endpoint?: string;
-    routePattern?: string;
-    ipAddress?: string;
-    userAgent?: string;
-  };
-
-  actor?: {                   // who caused it — human or machine
-    type?: string;            // 'user' | 'service' | 'system' | 'job'
-    userId?: string;
-    userRole?: string;
-    tenantId?: string;
-  };
-
-  entity?: {                  // the affected business resource
-    type?: string;
-    id?: string;
-  };
-
-  payload?: Record<string, unknown>;  // event-specific, genuinely variable data
-}
-```
-
-**Why nested internally:**
-
-- **Semantic clarity** — `event.request.ipAddress` communicates grouping that a
-  loose `ipAddress` among 20 fields does not.
-- **No name collisions** — `actor.userId` and `entity.id` coexist without ambiguity.
-- **Extensible** — adding a field to a group doesn't disturb the rest.
-
-**Why flatten only at output:** the nested form is canonical (one representation),
-but each destination wants a different shape. Flattening is the responsibility of
-the **transport** (via a shared `flatten()` helper), never the core:
-
-| Destination | Shape | Flatten? |
-|---|---|---|
-| JSON / JSONL | Nested, as-is | No — JSON represents nesting natively |
-| Console | Nested (single-line JSON) | No |
-| CSV / XLSX | Tabular columns (`request_ipAddress`, `actor_userId`, ...) | **Yes** |
-| TimescaleDB (future) | Fixed columns + `payload` as JSONB | **Yes**, for known fields; `payload` stays JSON |
-
-The rule: **flatten the known/structured fields into columns; leave the variable
-`payload` as JSON.** This maps cleanly onto the database schema (fixed columns +
-`payload JSONB`) when the queue transport is built. `flatten.ts` is a single shared
-utility so tabular transports don't each reimplement it (DRY).
-
----
-
-### 5. The Core
-
-#### 5.1 `storage.ts` — request context via AsyncLocalStorage
-
-`AsyncLocalStorage` provides a store that is **isolated per async execution
-chain** — i.e. per request. Two concurrent requests each get their own store; they
-never mix. This is what lets `record()` read the correct correlation ID deep in the
-call stack without the developer passing it around.
-
-```ts
-import { AsyncLocalStorage } from 'node:async_hooks';
-
-export interface RequestContext {
-  correlationId: string;
-  causationId?: string;
   request?: {
     httpMethod?: string;
     endpoint?: string;
@@ -192,241 +181,312 @@ export interface RequestContext {
     ipAddress?: string;
     userAgent?: string;
   };
+
   actor?: {
-    type?: string;
+    type?: string;            // e.g. 'user' | 'service' | 'system'
     userId?: string;
     userRole?: string;
     tenantId?: string;
   };
+
+  entity?: {
+    type?: string;
+    id?: string;
+  };
+
+  payload?: Record<string, unknown>;
+}
+```
+
+`id` and `occurredAt` are `readonly` — they are SDK-generated and not meant to be
+mutated by consumers who receive the event (e.g. inside a custom `Transport`).
+
+**Nested internally, flattened only at output** (unchanged principle): the core
+produces this nested shape; only tabular transports (CSV) flatten it, via the
+shared `flatten()` helper in `core/flatten.ts`. Console and JSONL preserve the
+nested structure as-is.
+
+**Schema drift protection:** because `AUDIT_EVENT_CSV_COLUMNS` (the canonical CSV
+schema) is a hand-maintained list, a dedicated test
+(`test/core/flatten.sync.test.ts`) verifies that a fully-populated `AuditEvent`,
+once flattened, produces exactly the same key set as `AUDIT_EVENT_CSV_COLUMNS` —
+neither more nor fewer. This catches silent drift if a field is added to
+`AuditEvent` without updating the CSV schema, or vice versa.
+
+---
+
+### 5. Core
+
+#### 5.1 `storage.ts` — request context via AsyncLocalStorage
+
+Unchanged in design. `AsyncLocalStorage` provides a store isolated per async
+execution chain (per request). `contextStore.run(context, callback)` is called by
+adapters, once per request; `getContext()` reads the current store from anywhere
+inside that chain.
+
+```ts
+export interface RequestContext {
+  correlationId: string;
+  causationId?: string;
+  request?: NonNullable<AuditEvent['request']>;
+  actor?: NonNullable<AuditEvent['actor']>;
 }
 
 export const contextStore = new AsyncLocalStorage<RequestContext>();
-
 export function getContext(): RequestContext | undefined {
   return contextStore.getStore();
 }
 ```
 
-The context mirrors the nested event groups it feeds into, so merging in `record()`
-is a straightforward structural copy.
-
-#### 5.2 `transport.ts` — the contract that makes transports interchangeable
+#### 5.2 `transport.ts` — the Transport contract
 
 ```ts
-import type { AuditEvent } from '@tnet06/mapa-audit-types';
-
-// Every transport implements exactly this. Nothing more.
 export interface Transport {
   send(event: AuditEvent): void | Promise<void>;
+  /** Optional. Drains any pending work before shutdown. Transports with nothing
+   *  to flush (e.g. ConsoleTransport) may omit this. */
+  close?(): Promise<void>;
 }
 ```
 
-The core depends only on this interface — never on a concrete transport. This is
-the seam that keeps console/file/queue swappable.
+The core depends only on this interface — never on a concrete transport.
+`close()` is opt-in: `ConsoleTransport` does not implement it (nothing to drain);
+`FileTransport` does (drains its internal write queue).
 
-#### 5.3 `record.ts` — the public event function
-
-```ts
-import { randomUUID } from 'node:crypto';
-import { getContext } from './storage';
-import type { Transport } from './transport';
-import type { AuditEvent } from '@tnet06/mapa-audit-types';
-
-let transport: Transport;
-let service: AuditEvent['service'];
-
-export function setTransport(t: Transport, svc: AuditEvent['service']) {
-  transport = t;
-  service = svc;
-}
-
-export function record(input: {
-  eventType: string;
-  eventName: string;
-  severity?: string;
-  outcome?: string;
-  entity?: { type?: string; id?: string };
-  payload?: Record<string, unknown>;
-}): void {
-  const ctx = getContext();
-
-  const event: AuditEvent = {
-    id: randomUUID(),                     // client-generated (idempotency-ready)
-    correlationId: ctx?.correlationId,    // same ID for the whole request
-    causationId: ctx?.causationId,
-    eventType: input.eventType,
-    eventName: input.eventName,
-    severity: input.severity ?? 'info',
-    outcome: input.outcome,
-    occurredAt: new Date().toISOString(),
-    service,
-    request: ctx?.request,
-    actor: ctx?.actor,
-    entity: input.entity,
-    payload: input.payload ?? {},
-  };
-
-  // Fire-and-forget: never block or throw into the host app.
-  try {
-    void transport.send(event);
-  } catch {
-    /* a transport failure must never surface to business logic */
-  }
-}
-```
-
-Two invariants preserved from the original design:
-
-- **`id` is generated client-side.** Harmless for console/file, but essential for
-  the queue transport's `ON CONFLICT` idempotency later. Generating it here means
-  the contract holds regardless of transport.
-- **Fire-and-forget.** `record()` never blocks business logic and never throws into
-  the host app, whatever the transport.
-
-#### 5.4 `configure.ts` — initialization
+#### 5.3 `audit-instance.ts` — `createAudit()` and `AuditInstance`
 
 ```ts
 export interface AuditConfig {
   serviceName: string;
   serviceVersion?: string;
-  environment: 'development' | 'staging' | 'production';
-  transport?: Transport;   // optional — defaults to ConsoleTransport
+  environment: Environment;         // validated against the shared Environment union
+  transports?: Transport[];         // default: [new ConsoleTransport()]
+  maskedFields?: string[];          // dot-notation paths into payload (see §5.4)
+  maxPayloadSize?: number;          // bytes; default 1_000_000 (1MB)
 }
 
-export function configureAudit(cfg: AuditConfig): void {
-  const transport = cfg.transport ?? new ConsoleTransport();
-  setTransport(transport, {
-    name: cfg.serviceName,
-    version: cfg.serviceVersion,
-    environment: cfg.environment,
-  });
+export interface AuditInstance {
+  record(input: RecordInput): void;
+  shutdown(): Promise<void>;
+  getInfo(): GlobalAuditInfo;
 }
+
+export function createAudit(config: AuditConfig): AuditInstance;
 ```
 
-If no transport is provided, the SDK falls back to `ConsoleTransport` so it works
-with zero setup. `environment` is validated against the same allowed values the
-database enforces.
+Each call to `createAudit()` creates fully isolated state (service metadata,
+transports array, masking/size options, shutdown flags) inside a closure — nothing
+is shared at module scope. `record()` on the returned instance:
+
+1. Builds the event via `buildAuditEvent()` (§5.4), merging context + service +
+   caller input.
+2. Dispatches to every configured transport via `sendFireAndForget()` (§5.5),
+   isolated per transport.
+
+`shutdown()` calls `close()` on every transport that implements it, in parallel,
+and is idempotent (a second call awaits the same in-flight shutdown rather than
+re-running it). Once `shutdown()` has started, `record()` on that instance becomes
+a no-op — no new work is queued into a transport that's being torn down.
+
+#### 5.4 `record.ts` — event assembly, masking, and size limiting
+
+`buildAuditEvent()` assembles the nested `AuditEvent`: client-generated `id`
+(`randomUUID()`, preserved for future queue-transport idempotency), context merge,
+default `severity: 'info'`, and payload preparation.
+
+**Payload masking (`maskedFields`)** — supports dot-notation paths of arbitrary
+depth (`'creditCard'`, `'user.ssn'`, `'payment.card.cvv'`). Implementation:
+
+- Only clones (`structuredClone`) the payload when masking is actually configured
+  — no cost for consumers who don't use it.
+- Navigates each path segment by segment; aborts that path silently (no throw) if
+  a segment is missing, `null`, a primitive, or an array. **Array element masking
+  is not supported** in this version (documented limitation — e.g.
+  `payments.0.cvv` will not be masked; if array elements carry sensitive data,
+  flatten or redact them before calling `record()`).
+- Matched values are replaced with the string `'***'`.
+- The caller's original payload object is never mutated, at any depth.
+
+**Payload size limiting (`maxPayloadSize`)** — applied *after* masking (so a large
+but subsequently-masked payload is measured post-mask). If the serialized payload
+exceeds the configured byte limit, the entire payload is replaced with:
+```ts
+{ truncated: true, originalSizeBytes: number, maxSizeBytes: number }
+```
+Partial truncation of the JSON string is deliberately avoided (it would risk
+producing invalid JSON); the marker object is a clean, unambiguous replacement.
+
+#### 5.5 `sendFireAndForget()` — dispatch, isolated per transport
+
+```ts
+export function sendFireAndForget(transport: Transport, event: AuditEvent): void
+```
+
+For a single transport: calls `send()`; if it throws synchronously or returns a
+rejecting Promise, the error is caught and reported via `emitAuditWarning()`
+(§5.6) — never re-thrown, never propagated to the caller. `AuditInstance.record()`
+calls this once per configured transport, in a loop with each call independently
+try/caught — a failure in one transport never affects delivery to the others
+(fan-out isolation).
+
+#### 5.6 `warnings.ts` — shared warning helper
+
+```ts
+export function emitAuditWarning(message: string): void;  // process.emitWarning(`[mapa-audit] ${message}`), self-guarded
+export function errorMessage(error: unknown): string;      // safe unknown -> string
+```
+
+Extracted to avoid duplicating the same warning-emission logic between
+`record.ts` (transport dispatch failures) and `transports/file.ts` (write
+failures). Used for: transport send failures, file write failures, and the
+one-time "record() called before initGlobalAudit()" warning (§5.7).
+
+#### 5.7 `global-audit.ts` — the global convenience singleton
+
+```ts
+export function initGlobalAudit(config: AuditConfig): void;      // creates and stores one createAudit() instance
+export function recordGlobal(input: RecordInput): void;           // delegates to the stored instance; warns once if none exists
+export function shutdownGlobalAudit(): Promise<void>;
+export function resetGlobalAudit(): void;                         // test isolation
+export function getGlobalAudit(): GlobalAuditInfo | undefined;    // §2.3
+```
+
+If `record()` (the public shortcut, re-exported from `record.ts`) is called before
+`initGlobalAudit()`, the event is silently discarded **and** a `process.emitWarning`
+is emitted — but only **once** per process (a module-level flag prevents repeated
+warnings from flooding output on repeated misuse). `resetGlobalAudit()` also
+resets this flag, so each test that needs to re-trigger the warning can.
 
 ---
 
 ### 6. Transports
 
-Each transport is a self-contained class implementing `Transport.send()`. They
-share nothing (except the `flatten()` helper for tabular formats) and are added
-independently.
-
-#### 6.1 ConsoleTransport (default, zero infrastructure)
-
-Writes directly to `process.stdout` / `process.stderr` — **not** `console.log`.
-`console.log` is a wrapper over stdout that adds its own formatting and inspection
-overhead; writing the file descriptor directly gives full control over the output
-and better throughput. This is the same approach Pino and Winston take, and is why
-they're fast. Errors/critical go to stderr (standard convention), everything else
-to stdout, so operators can redirect them separately.
+#### 6.1 ConsoleTransport
 
 ```ts
 export class ConsoleTransport implements Transport {
-  send(event: AuditEvent): void {
-    const line = JSON.stringify(event) + '\n';
-    if (event.severity === 'error' || event.severity === 'critical') {
-      process.stderr.write(line);
-    } else {
-      process.stdout.write(line);
-    }
-  }
+  send(event: AuditEvent): void { /* process.stdout.write or process.stderr.write */ }
 }
 ```
 
-The event stays **nested** here (JSON preserves structure naturally). Delivers
-value immediately with no queue or DB — the automatic context capture is already
-useful on its own.
+Writes directly to `process.stdout` / `process.stderr` — **not** `console.log`
+(control and throughput, same rationale as Pino/Winston). Events with severity
+`error` or `critical` go to `stderr`; everything else to `stdout`. Emits the
+nested event as a single line of JSON (no flattening). No `close()` — nothing to
+drain. This is the default when no `transports` are configured.
 
-#### 6.2 FileTransport (jsonl / csv)
+**Data-safety note:** `ConsoleTransport` writes the event as received. It does not
+redact anything on its own; `maskedFields` (§5.4) must be configured by the
+consumer for sensitive fields to be redacted before they reach any transport,
+including console.
 
-Writes structured events to a file. Default format **JSON Lines** (one JSON object
-per line — the standard for appendable logs, keeps the nested structure). CSV uses
-the shared `flatten()` helper to produce columns.
+#### 6.2 FileTransport
 
 ```ts
-export class FileTransport implements Transport {
-  constructor(private opts: { path: string; format?: 'jsonl' | 'csv' }) {}
-  send(event: AuditEvent): void { /* jsonl: append nested JSON; csv: append flatten(event) */ }
+export interface FileTransportOptions {
+  path: string;
+  format?: 'jsonl' | 'csv' | 'text';   // default: 'jsonl'
 }
 ```
 
-#### 6.3 QueueTransport (later module — see §10)
+Appends one entry per event (never rewrites the file). Robustness details:
 
-The RabbitMQ → Worker → TimescaleDB pipeline, packaged separately. **Opt-in and
-self-hosted**: consumers who choose it run their own queue + worker + database
-(provided via Docker/Terraform), pointing the SDK at their own instance. It
-flattens known fields to columns and stores `payload` as JSONB (per §4). Built
-last; console and file ship first.
+- **Directory creation** is cached as a one-time operation (`#ensureDirectory`),
+  not repeated on every `send()`.
+- **Write ordering** under fire-and-forget: writes are chained through an internal
+  `#pendingWrite` promise, so concurrent `send()` calls on the same instance are
+  serialized and applied in order, even though the caller never awaits them.
+- **`close()`** awaits `#pendingWrite`, draining any queued writes before
+  resolving — this is what `AuditInstance.shutdown()` relies on to avoid losing
+  the last event(s) on process exit.
+- **Write failures** are reported via `emitAuditWarning()` (§5.6), not swallowed.
+
+**Formats:**
+- `'jsonl'` (default) — one line of nested JSON per event.
+- `'csv'` — uses `flatten()` (§4) against the canonical, fixed
+  `AUDIT_EVENT_CSV_COLUMNS` schema. The header is written once, decided by an
+  **in-memory flag** (`#headerWritten`), not by re-checking the filesystem on
+  every write — this closes a race condition where concurrent `send()` calls
+  could each observe an "empty file" and each write a duplicate header. Missing
+  fields are left as **empty cells** (never the literal string `"null"`).
+  **Known limitation:** this protects a single `FileTransport` instance/process.
+  Multiple separate instances (or processes) writing to the *same* CSV path can
+  still race — if several parts of an app, or several `createAudit()` calls, need
+  to write to the same file, share one `FileTransport` instance rather than
+  creating several pointed at the same path. Multi-process concurrent writers
+  would need OS-level file locking, which is out of scope.
+- `'text'` — a single human-readable line, intentionally minimal:
+  `<occurredAt> [<eventType>/<severity>] <eventName> correlationId=<...> outcome=<...>`.
+  This is deliberately not exhaustive (no actor/entity/service/payload) — it is
+  meant for quick human scanning, not full fidelity; use `'jsonl'` when the
+  complete event is needed.
+
+**Not implemented:** file rotation (`maxSize`/`maxFiles`). For high-volume
+production use, pair `FileTransport` with an external rotation tool (e.g.
+`logrotate`) or defer to the future queue/DB module.
 
 ---
 
 ### 7. Adapters
 
-Adapters are the **only** framework-specific code. Each reads the incoming request
-in that framework's shape, builds a `RequestContext`, and runs the rest of the
-request inside `contextStore.run(context, next)`.
-
-| Framework | Mechanism |
-|---|---|
-| Express | Middleware `(req, res, next)` |
-| Fastify | `onRequest` hook |
-| NestJS | Middleware or Interceptor (fits Nest's execution model) |
-| Node (manual) | A helper to open a context explicitly, for non-HTTP entry points (jobs, scripts) |
-
-Example (NestJS middleware):
+#### 7.1 `expressAdapter(options?)`
 
 ```ts
-@Injectable()
-export class AuditMiddleware implements NestMiddleware {
-  use(req: any, _res: any, next: () => void) {
-    const context: RequestContext = {
-      correlationId: req.headers['x-correlation-id'] ?? randomUUID(),
-      request: {
-        httpMethod: req.method,
-        endpoint: req.originalUrl,
-        ipAddress: req.ip,
-        userAgent: req.headers['user-agent'],
-      },
-      actor: { userId: req.user?.id, userRole: req.user?.role },
-    };
-    contextStore.run(context, () => next());
-  }
+export interface ExpressAdapterOptions {
+  correlationIdHeader?: string;   // default: 'x-correlation-id'
+  causationIdHeader?: string;     // default: 'x-causation-id'
+  extractActor?: (req: Request) => NonNullable<RequestContext['actor']> | undefined;
+                                    // default: reads req.user?.id / req.user?.role,
+                                    // infers type: 'user' (ActorType) when present
 }
+
+export function expressAdapter(options?: ExpressAdapterOptions): RequestHandler;
 ```
 
-Correlation ID: reused from the `x-correlation-id` header if present (cross-service
-correlation), otherwise generated — this service becomes the origin. The same ID
-lives in the store for the whole request; every `record()` call during that request
-reads it automatically. Concurrent requests are isolated by `AsyncLocalStorage` —
-they never share or mix IDs.
+Builds a `RequestContext` from the incoming request and runs the rest of the
+request inside `contextStore.run(context, next)`. `correlationId` is reused from
+the configured header if present (cross-service correlation), otherwise generated
+(`randomUUID()`) — this service becomes the origin. `causationId` is read the same
+way, symmetrically, and left absent if the header is missing.
+
+`extractActor`, when provided, **fully replaces** the default `req.user`-based
+extraction (not merged with it) — the caller owns the entire actor shape. Default
+extraction is defensive: `req.user`, `req.route`, and header values may be
+`undefined` and are handled without throwing; when present, `actor.type` defaults
+to `'user'` (`ActorType`), so requests captured with an authenticated user are
+correctly classified rather than leaving `type` empty.
+
+This is the only adapter implemented today. Fastify and NestJS adapters, plus a
+manual-context helper for non-HTTP entry points (jobs, CLI scripts), remain
+planned but unimplemented — see the BUILD_PLAN.
 
 ---
 
-### 8. Usage Example (NestJS, console transport)
+### 8. Usage Example (Express, console transport)
 
 ```ts
-// main.ts — configure once
-import { configureAudit } from '@tnet06/mapa-audit-sdk';
+// main.ts — configure once, at startup
+import { initGlobalAudit } from '@tnet06/mapa-audit-sdk';
 import { ConsoleTransport } from '@tnet06/mapa-audit-sdk/transports';
 
-configureAudit({
+initGlobalAudit({
   serviceName: 'recipes-api',
   environment: 'production',
-  transport: new ConsoleTransport(),   // or omit for the default; or FileTransport
+  transports: [new ConsoleTransport()],   // omit for the same default
+  maskedFields: ['creditCard', 'user.ssn'],
 });
 ```
 
 ```ts
-// app.module.ts — register the adapter
-consumer.apply(AuditMiddleware).forRoutes('*');
+// app setup — register the adapter before routes
+import { expressAdapter } from '@tnet06/mapa-audit-sdk/express';
+app.use(expressAdapter());
 ```
 
 ```ts
-// recipes.controller.ts — record anywhere, no context passed manually
+// anywhere in a request handler — record, no context passed manually
+import { record } from '@tnet06/mapa-audit-sdk';
+
 record({
   eventType: 'business',
   eventName: 'recipe.updated',
@@ -437,50 +497,75 @@ record({
 // automatically carries correlationId, request.*, actor.* of THIS request
 ```
 
-Switching to file output is a one-line change at `configureAudit` — no controller
-or middleware code changes.
+```ts
+// graceful shutdown — drain pending transport writes before exit
+import { shutdownGlobalAudit } from '@tnet06/mapa-audit-sdk';
+
+process.on('SIGTERM', async () => {
+  await shutdownGlobalAudit();
+  process.exit(0);
+});
+```
+
+A runnable version of this pattern (multiple endpoints, all transports, masking,
+and truncation demonstrated live) exists at `examples/express-demo/` in this
+repository.
 
 ---
 
-### 9. Failure & Durability (per transport)
-
-Durability depends on the chosen transport, not the SDK core:
+### 9. Failure & Durability
 
 | Transport | Durability characteristics |
 |---|---|
-| Console | Ephemeral — goes to stdout/stderr; capture is best-effort by nature |
-| File | Persisted to local disk; durability = the file's durability |
-| Queue | Decoupled pipeline; best-effort producer buffer (documented in the queue-transport module) |
+| Console | Ephemeral — goes to stdout/stderr; best-effort by nature |
+| File | Persisted to local disk; durability = the file's durability; writes serialized and drainable via `close()`/`shutdown()` |
+| Queue (future) | Decoupled pipeline; see §10 |
 
-Universal guarantee across all transports: **`record()` never blocks or throws into
-the host application.** A transport error is contained and, where sensible, logged —
-never propagated to business logic.
+Universal guarantees, regardless of transport:
+- `record()`/`AuditInstance.record()` never blocks or throws into the host
+  application.
+- A transport failure is contained and reported via `process.emitWarning` — never
+  propagated to business logic.
+- `shutdown()` drains transports that support draining before the process exits,
+  when the host app calls it on a signal handler (see §8).
 
 ---
 
-### 10. Distribution & Packaging
+### 10. Distribution & Packaging, and the Future Queue Module
 
 - **`@tnet06/mapa-audit-sdk`** — core + console + file transports + adapters. Main
   package; zero heavy dependencies; works standalone.
 - **`@tnet06/mapa-audit-types`** — shared event contract; published alongside the
   SDK (the SDK depends on it).
-- **Queue transport in its own package** (e.g. `@tnet06/mapa-audit-transport-queue`)
-  — carries `amqp-connection-manager` and related deps, so console/file-only
-  consumers never install them. Built last.
-- **Worker + infra are NOT npm packages** — they're deployable services
-  (Docker/Terraform), used only by consumers who adopt the queue transport.
-- Semantic versioning via `changesets`; framework deps as `peerDependencies`;
-  MIT-licensed; published to the public npm registry for portfolio/community use, or
-  an internal registry in a company context — same code, different registry.
+- **A queue transport, Worker, and TimescaleDB persistence pipeline remain a
+  future, separate, opt-in module** — described at a design level in
+  `platform-general-overview.md`, `database-design.md`, and
+  `rabbitmq-worker-architecture.md`. **None of that is implemented today.** Those
+  documents should be read as forward-looking design, not as a description of the
+  current SDK's behavior. When built, the queue transport will ship as its own
+  package (carrying `amqp-connection-manager` and related dependencies so
+  console/file-only consumers never install them), implementing the same
+  `Transport` interface — a drop-in addition, not a core dependency.
+- The Worker and supporting infra are not npm packages — they are deployable
+  services (Docker/Terraform), relevant only to consumers who adopt the future
+  queue transport.
+- MIT-licensed; publishable to the public npm registry or an internal registry —
+  same code, different registry destination (not yet published as of this
+  revision — see the project's publication checklist for outstanding
+  `package.json` metadata work).
 
 ---
 
-### 11. Out of Scope for v1
+### 11. Out of Scope (current, deliberate)
 
-- Queue transport + Worker + TimescaleDB module (built after console/file are solid).
-- Additional framework adapters beyond the first (each its own later phase).
-- Automatic correlation-ID propagation on outbound HTTP calls.
-- Built-in PII hashing at capture (planned config hook).
+- Queue transport + Worker + TimescaleDB module (§10) — future, separate.
+- Additional framework adapters beyond Express (Fastify, NestJS, a manual-context
+  helper for non-HTTP contexts) — planned, unimplemented.
+- File rotation (`maxSize`/`maxFiles`) in `FileTransport` — pair with an external
+  tool if needed.
+- Array-element masking in `maskedFields` (only object paths are supported).
+- Automatic correlation-ID propagation on outbound HTTP calls made by the service
+  itself.
+- Multi-process file locking for `FileTransport` CSV writes to a shared path.
 
-Documented as conscious boundaries — the console/file path is the v1 focus; the
-queue path is a deliberate later module.
+Documented as conscious boundaries, not omissions.

@@ -1,214 +1,219 @@
 # Audit & Business Observability Platform
-## Platform Design Overview
+## Platform Design Overview (Current State — v2)
 
-**Status:** Draft for review
-**Audience:** Product & Engineering
-**Owner:** Platform Engineering
+**Status:** Reflects what is implemented today, with the future pipeline clearly
+marked as such
+**Audience:** Engineering, anyone evaluating adoption
+**Companion to:** SDK Architecture (current, implemented), Database Design
+(future), RabbitMQ + Worker Architecture (future)
 
----
-
-## 1. What This Is
-
-The Audit & Business Observability Platform is an internal, reusable system that lets any backend service record what happened inside it — business actions, errors, security events, and request traces — without each team having to build its own logging pipeline.
-
-Teams integrate by installing a single SDK. Everything downstream (transport, processing, storage, dashboards) is operated centrally as a shared service. The goal is that onboarding a new service takes minutes, not days, and that the whole organization gets consistent, queryable audit and observability data out of the box.
-
-In one sentence: **it turns "every team reinvents logging" into "install one SDK and you're done."**
-
----
-
-## 2. Why It Exists
-
-Today, each service tends to solve this problem in isolation — one team writes logs to a local table, another to files, another to a third-party tool. The result is fragmented: no consistent format, no cross-service correlation, and audit trails that live in whatever shape each team happened to choose.
-
-This platform exists to provide:
-
-- **Consistency** — one event format across every service.
-- **Correlation** — follow a single request across multiple services via a shared correlation ID.
-- **Self-service** — teams consume it without operating any infrastructure themselves.
-- **Separation of concerns** — audit/observability logging never blocks or slows down the business request it's recording.
+> **Superseded content notice:** earlier drafts of this document presented a
+> `SDK → RabbitMQ → Worker → PostgreSQL` pipeline as the platform's current,
+> central architecture, described a public API (`initAuditSDK`) that never
+> existed, and referenced PostgreSQL with `pg_partman` where the actual storage
+> decision is TimescaleDB. This revision corrects all three and separates what
+> is **implemented today** from what is **future, opt-in design**.
 
 ---
 
-## 3. Scope & Positioning (read this before anything else)
+### 1. What this platform is
 
-This platform deliberately sits at the intersection of two related-but-distinct disciplines, and it's important the whole team shares the same understanding of which guarantees we do and don't provide:
+A small ecosystem for structured audit, business, error, and security events in
+backend services, built from independently useful pieces:
 
-| | **Observability** (what we guarantee) | **Legal-grade Audit** (what we do NOT guarantee in v1) |
+| Piece | Status | What it does |
 |---|---|---|
-| Purpose | Debugging, tracing, operational insight | Compliance, non-repudiation, legal evidence |
-| Durability | Best-effort — events may be dropped if the platform is unavailable and local buffers fill | Guaranteed — no event may ever be lost |
-| Failure stance | Never impact the host application, even at the cost of an event | Never lose an event, even at the cost of blocking |
+| **SDK** (`@tnet06/mapa-audit-sdk`) | ✅ **Implemented, usable today** | Automatic request-context capture, a structured event model, built-in data safety (masking, size limits), pluggable transports (console, file today) |
+| **Queue transport** (`@tnet06/mapa-audit-transport-queue`) | 🔜 Future, separate package | Publishes events to a message broker instead of console/file |
+| **Worker** | 🔜 Future, separate deployable service | Consumes the queue, validates, persists to a database |
+| **Database schema** (TimescaleDB) | 🔜 Future | Where the Worker persists events, if adopted |
 
-**v1 is an observability-first platform with strong audit ergonomics, not a legal-grade audit system.** The name includes "Audit" because it captures audit-style events (who did what, when, to which entity) with excellent traceability — but its durability guarantees are best-effort by design (see §6). If the organization later needs legal-grade guarantees for specific event types, that becomes a scoped follow-up with a different durability path, not a silent assumption.
+**The SDK works completely on its own, with zero additional infrastructure.**
+A team can install it, call `initGlobalAudit()` once, and start recording
+structured events to console or a local file — nothing else to deploy, nothing
+else to operate. The queue/Worker/database pipeline is an **optional, separate
+extension** for teams that want centralized, queryable, long-term storage — not
+a requirement to get value from the SDK.
 
-This distinction is called out up front because the word "audit" implies stronger guarantees than a best-effort pipeline provides, and product decisions should be made with that clarity.
+This is a deliberate ordering, not an accident: build the piece with the
+highest value-to-effort ratio first (structured, context-aware events with
+safe defaults), ship it, and let the persistence pipeline be adopted
+independently and later, by whoever actually needs it.
 
 ---
 
-## 4. High-Level Architecture
+### 2. What "the SDK" gives you (implemented)
+
+The SDK's core value has nothing to do with where events end up — it is what
+happens *before* that:
+
+- **Automatic request-context capture** — correlation ID, causation ID,
+  actor (who), and request metadata (method, endpoint, IP, user agent),
+  captured once per request via an adapter (`AsyncLocalStorage`-based) and
+  merged into every event recorded during that request, without the caller
+  passing any of it manually.
+- **A structured, nested event model** (`AuditEvent`) — not free-text logs.
+  `eventType`, `eventName`, `outcome`, `entity`, `payload`, all typed.
+- **Built-in data safety** — `maskedFields` (dot-notation, nested paths) redact
+  sensitive payload fields before any transport sees the event;
+  `maxPayloadSize` replaces oversized payloads with a truncation marker
+  instead of forwarding arbitrarily large data.
+- **Pluggable transports** — `ConsoleTransport` and `FileTransport`
+  (jsonl/csv/text) today, each implementing the same small interface. Multiple
+  transports can be configured together (fan-out): the same event can go to
+  console and a file simultaneously, with one transport's failure never
+  affecting the others.
+- **Explicit lifecycle** — `shutdown()` drains any transport with pending work
+  (e.g. buffered file writes) before a process exits, so events are not lost
+  on graceful shutdown.
+- **Visible failure** — transport errors and misconfiguration emit
+  `process.emitWarning` instead of failing silently, while never throwing into
+  the host application (fire-and-forget by design).
+
+See `sdk-architecture.md` for the full technical reference, and
+`examples/express-demo/` for a runnable demonstration of all of the above.
+
+---
+
+### 3. The public API (as implemented — not `initAuditSDK`)
+
+Earlier drafts of this document referenced a two-function contract,
+`initAuditSDK(config)` / `record(event)`, that was never built. The actual
+public surface is a **hybrid** of a global convenience API and a creational
+API — see `sdk-architecture.md` §2 for the full rationale. Summary:
+
+```ts
+// Global — the common case: one configuration per process, initialized once
+import { initGlobalAudit, record, shutdownGlobalAudit } from '@tnet06/mapa-audit-sdk';
+
+initGlobalAudit({
+  serviceName: 'recipes-api',
+  environment: 'production',
+  transports: [new ConsoleTransport()],
+  maskedFields: ['creditCard', 'user.ssn'],
+});
+
+record({
+  eventType: 'business',
+  eventName: 'recipe.updated',
+  outcome: 'success',
+  entity: { type: 'recipe', id: recipe.id },
+  payload: { changedFields: ['title'] },
+});
+```
+
+```ts
+// Creational — isolated instances, for tests or multiple independent configs
+import { createAudit } from '@tnet06/mapa-audit-sdk';
+const audit = createAudit({ serviceName: 'recipes-api', environment: 'test', transports: [...] });
+audit.record({ ... });
+```
+
+Adapters connect a framework to this API by populating request context
+automatically. **Express is implemented today** (`expressAdapter`, fully
+configurable: custom headers, custom actor extraction). Fastify, NestJS, and a
+Node.js `http`-module adapter (for frameworkless services) remain planned —
+all designed to stay lightweight and live inside the main SDK package (no
+heavy dependencies), unlike the queue transport (§4).
+
+---
+
+### 4. The optional pipeline: queue, Worker, database (future, not implemented)
+
+For teams that want events centrally persisted, queryable, and retained beyond
+a local file, the design calls for three additional, **separate** pieces —
+none of which exist yet:
 
 ```
-┌────────────────────────────────────────────────────┐
-│  Consuming Service (Express / Fastify / NestJS ...) │
-│                                                       │
-│   business logic  ──▶  record(event)  ◀── SDK        │
-│                              │                        │
-│   request enters ──▶ adapter captures context        │
-│      (correlation id, user, ip, endpoint, ...)       │
-└──────────────────────────────┬───────────────────────┘
-                               │ publish (fire-and-forget)
-                               ▼
-                        ┌─────────────┐
-                        │  RabbitMQ    │  central, shared
-                        └──────┬───────┘
-                               │
-                        ┌──────▼───────┐
-                        │   Worker      │  idempotent, DLQ-backed
-                        │  (consumer)   │
-                        └──────┬───────┘
-                               │  ON CONFLICT DO NOTHING
-                        ┌──────▼───────┐
-                        │  PostgreSQL   │  single partitioned table
-                        │  audit_events │
-                        └──────┬───────┘
-                               │
-                    ┌──────────┴──────────┐
-                    ▼                     ▼
-              ┌──────────┐         ┌─────────────┐
-              │ Grafana  │         │ Internal API │
-              │dashboards│         │ (read-only)  │
-              └──────────┘         └─────────────┘
+Your service (SDK)  →  Queue transport  →  [ message broker ]  →  Worker  →  Database
+   (implemented)         (future, own          (RabbitMQ,        (future,     (future,
+                          npm package)           self-hosted)      separate     TimescaleDB —
+                                                                    process)     see below)
 ```
 
-The system is a classic asynchronous ingestion pipeline: capture cheaply and locally, hand off to a queue, process out-of-band, store in a query-optimized shape, expose for reading.
+- **Queue transport** — a `Transport` implementation (e.g.
+  `RabbitMQTransport`) that publishes events to a message broker instead of
+  console/file. Ships as its **own npm package**
+  (`@tnet06/mapa-audit-transport-queue`), because it carries a real,
+  non-trivial client dependency (an AMQP client library) — consumers who only
+  use console/file transports never install it. It implements the *same*
+  `Transport` interface as everything else; from the SDK core's perspective,
+  it is interchangeable with `FileTransport`.
+- **Worker** — a separate, deployable service (its own process, its own
+  Docker image, not an npm package) that consumes the queue, validates
+  incoming events, and persists them. This is a **reference implementation**,
+  not something the SDK forces on anyone: a team adopting the queue transport
+  can run this Worker as-is, adapt it, or write their own — the only real
+  contract is the shape of the message on the queue (the shared `AuditEvent`
+  type), not a code dependency on this specific Worker.
+- **Database** — the Worker's reference implementation persists to
+  **TimescaleDB** (a time-series-oriented extension of PostgreSQL), chosen for
+  its native support of time-partitioned hypertables, compression, and
+  retention policies — a good structural fit for audit events, which are
+  fundamentally time-series data accessed mostly by time range. Earlier
+  drafts of this document referenced plain PostgreSQL with manual
+  `pg_partman`-based partitioning; that was an inconsistency with the actual
+  decision (documented in `database-design.md`) — TimescaleDB is the current
+  design, not manually-managed partitioning.
+
+**None of this — queue transport, Worker, database schema — is implemented as
+of this revision.** Design details live in `rabbitmq-worker-architecture.md`
+and `database-design.md`; both should be read as forward-looking design.
+
+#### 4.1 Why this stays optional and separate
+
+A service using only `ConsoleTransport`/`FileTransport` never needs to know
+this pipeline exists — no queue client, no broker connection, no additional
+infrastructure to operate. This is deliberate: the SDK's value (structured,
+context-aware, safe-by-default events) does not depend on centralized
+persistence. Centralization is something teams opt into when they need
+cross-service querying, long retention, or compliance-grade durability beyond
+a local file — not a requirement to start using the SDK productively.
+
+#### 4.2 What was previously incorrect about "buffering"
+
+An earlier draft stated that the SDK buffers events in memory if the queue is
+unavailable. **No such buffering exists in the SDK today**, and no
+`QueueTransport` exists yet to buffer for. When the queue transport is built,
+its buffering/backpressure behavior (if any) will be specified in its own
+design, not assumed here.
 
 ---
 
-## 5. The Four Components
+### 5. Guarantees, today
 
-### 5.1 The SDK (what teams install)
+Independent of whether the future pipeline is ever adopted, these hold for
+every transport the SDK ships today:
 
-The only piece consuming teams touch. Its entire public contract is two functions:
+- Recording an event never throws into, or blocks, the calling application
+  (fire-and-forget).
+- A transport failure is isolated — it never prevents delivery to other
+  configured transports, and never surfaces as an exception to the caller. It
+  is reported via `process.emitWarning`, never silently swallowed.
+- `shutdown()` drains any transport with pending work before a process exits
+  cleanly, so a graceful shutdown does not lose in-flight events.
+- Sensitive payload fields, when identified via `maskedFields`, are redacted
+  before any transport — including console — ever receives the event.
 
-- `initAuditSDK(config)` — called once at startup.
-- `record(event)` — called anywhere in business logic.
-
-Everything else is automatic:
-
-- **Context capture** — a per-framework adapter (Express, Fastify, NestJS, Next.js) reads the incoming request and stores request context (correlation ID, user, IP, endpoint, etc.) in Node's `AsyncLocalStorage`. Business code calls `record()` without ever passing the request object around.
-- **Framework-agnostic core** — the capture-and-publish engine knows nothing about any framework. Adding a new framework means writing one small adapter file; the core never changes.
-- **Fire-and-forget** — `record()` never blocks business logic and never throws into it. If the queue is down, events are buffered in memory and the host app continues normally. **Protecting the host application always wins over capturing an event.**
-
-### 5.2 RabbitMQ (transport)
-
-A central, shared message broker that decouples event capture from event storage. This decoupling is the core value: if the Worker or database is slow, restarting, or down, the consuming services are unaffected — events queue up and drain when the pipeline recovers.
-
-### 5.3 The Worker (processing & persistence)
-
-A standalone service (its own process, never embedded in a consuming app) that:
-
-- Consumes events from the queue.
-- Deduplicates them idempotently (see §6).
-- Persists them to PostgreSQL.
-- Routes un-processable messages to a Dead Letter Queue for diagnosis and retry, so a single bad message never blocks the pipeline or gets lost silently.
-
-### 5.4 Storage & Read Layer
-
-- **PostgreSQL** — a single partitioned `audit_events` table using an `event_type` discriminator plus a flexible `JSONB payload`. Chosen over multiple specialized tables for simpler ingestion, no joins to reconstruct a request, and easy addition of new event types.
-- **Grafana** — connects directly to PostgreSQL (no Prometheus required) for dashboards and ad-hoc queries.
-- **Internal API** — a read-only HTTP interface for teams that need programmatic access to their audit data without direct database access.
+These guarantees are transport-agnostic by construction: they hold the same
+way whether the underlying transport is `ConsoleTransport`, `FileTransport`,
+or, in the future, a queue transport.
 
 ---
 
-## 6. Key Design Decisions
+### 6. Status summary
 
-These are the decisions that define the platform's correctness and behavior. They should be treated as fixed contracts unless deliberately revisited.
+| Capability | Status |
+|---|---|
+| Structured event model, automatic context capture | ✅ Implemented |
+| Console / file transports, fan-out, lifecycle | ✅ Implemented |
+| Field masking, payload size limiting | ✅ Implemented |
+| Express adapter (configurable) | ✅ Implemented |
+| Fastify / NestJS / Node `http` adapters | 🔜 Planned, unimplemented |
+| Queue transport (RabbitMQ) | 🔜 Planned, unimplemented, separate package |
+| Worker (consume, validate, persist) | 🔜 Planned, unimplemented, separate service |
+| TimescaleDB schema & persistence | 🔜 Planned, unimplemented |
+| Query API / dashboards over persisted events | 🔜 Depends on the above; not yet designed in detail |
 
-### 6.1 Idempotency via client-generated event IDs
-
-RabbitMQ guarantees *at-least-once* delivery, meaning the same event can legitimately arrive more than once (consumer restarts, network blips, redeliveries). To prevent duplicate rows:
-
-- The **SDK generates each event's `id`** before publishing — not the database at insert time.
-- The Worker inserts with `ON CONFLICT DO NOTHING`, so a redelivered event is silently discarded.
-
-This is a platform-wide contract: `id` generation location is a correctness guarantee, not an implementation detail.
-
-### 6.2 Best-effort durability (the deliberate trade-off)
-
-When the queue is unreachable, the SDK buffers events in memory (capped) and drops the oldest if the buffer fills. This is intentional and follows directly from §3: **for an observability platform, never harming the host application is worth more than guaranteeing every single event.** Teams needing stronger guarantees for specific event types should treat that as a scoped extension, not an assumption about current behavior.
-
-### 6.3 `occurred_at` vs `created_at`
-
-Two timestamps are stored: when the event *happened* in the application (`occurred_at`, set by the SDK) and when it was *persisted* (`created_at`, set on insert). Because ingestion is asynchronous, these can diverge during backlog — keeping both is what lets us tell real event timing apart from pipeline delay. The table is partitioned by `occurred_at` because queries ask about business time, not ingestion time.
-
-### 6.4 `route_pattern` alongside raw endpoint
-
-Both the concrete URL (`/users/123/orders/456`) and its pattern (`/users/:userId/orders/:orderId`) are stored. Aggregating dashboards by the pattern avoids the cardinality explosion that makes grouping by raw URL useless.
-
-### 6.5 Strong constraints on classification fields
-
-`event_type`, `severity`, and `environment` are constrained to fixed allowed values at the database level. A typo from one service (`'prod'` vs `'production'`) can't silently pollute the dataset and break everyone's dashboards.
-
----
-
-## 7. Sensitive Data & Retention (must be addressed, not deferred)
-
-The platform captures personal data — `ip_address`, `user_id`, `user_agent`. This carries real obligations that product and engineering must plan around, even if full tooling isn't built in v1:
-
-- **This data is PII.** It is subject to data-protection regulations (GDPR-style) wherever the organization operates.
-- **Retention is not only a performance concern.** Time-based partitioning makes dropping old data efficient, and that doubles as a coarse retention policy — but it does not, on its own, satisfy per-user deletion ("right to be forgotten") requests.
-- **v1 minimum stance:** document what PII is captured, set a default retention window enforced by partition dropping, and flag per-user erasure and field-level anonymization as known, scoped follow-ups rather than surprises discovered later.
-
-Raising this at design time — rather than after an auditor or a user request forces it — is a core part of treating this as a real platform.
-
-### Recommended v1 addition
-
-Add a `payload_schema_version` column now. It's trivial to add today and impossible to reconstruct retroactively; it's what keeps JSONB flexibility from becoming an ungovernable swamp as event shapes evolve across services.
-
----
-
-## 8. Operational Model
-
-- **Local development / small deployments:** `docker compose up` brings up the Worker, RabbitMQ, PostgreSQL, and Grafana together in one command. Consuming a service is then just `npm install` of the SDK plus pointing it at the queue URL.
-- **Production:** infrastructure (managed PostgreSQL, managed or self-hosted RabbitMQ, the Worker) is provisioned via Terraform. The Worker never knows or cares whether its dependencies are local containers or managed cloud services — it only receives connection strings via environment variables (12-factor).
-- **Partition management:** automated from day one (via `pg_partman` or a scheduled job that pre-creates the next period's partition). Without this, inserts outside existing ranges fail — it is not optional.
-
----
-
-## 9. Build Order (recommended)
-
-1. Extract the existing logging worker into a standalone Worker service.
-2. Add idempotency (`ON CONFLICT`) and Dead Letter Queue handling.
-3. Build the SDK core plus one framework adapter, end-to-end.
-4. Containerize everything (`docker compose`).
-5. Add Terraform for a cloud deployment.
-6. Build the read layer (Grafana dashboards first, then the internal API).
-
-Each step produces something demonstrable, avoiding a long stretch with nothing runnable.
-
----
-
-## 10. Explicitly Out of Scope for v1
-
-- Legal-grade / guaranteed-durability audit path
-- Per-user data erasure and field-level PII anonymization tooling
-- Automatic correlation-ID propagation on outbound HTTP calls
-- Event batching/compression
-- Disk-backed (crash-durable) SDK buffer
-- Browser/frontend SDK
-
-These are documented not as omissions but as conscious boundaries, each a candidate for a future scoped iteration.
-
----
-
-## 11. Component Reference Documents
-
-This overview is the entry point. Detailed design lives in companion documents:
-
-- **Database Design** — table schema, partitioning, indexes, idempotency mechanics.
-- **SDK Architecture** — public API, AsyncLocalStorage, adapters, failure modes, versioning.
-- **RabbitMQ + Worker Architecture** — exchanges, queues, retries, DLQ, consumer logic *(next)*.
-- **API Design** — read endpoints for querying events and audits *(planned)*.
-- **Grafana & Observability** — dashboards and standard queries *(planned)*.
-- **Deployment Architecture** — Docker Compose and Terraform layouts *(planned)*.
+See `docs/BUILD_PLAN.md` for the phase-by-phase build order and current
+progress.

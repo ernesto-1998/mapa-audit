@@ -1,5 +1,18 @@
 # Audit & Business Observability Platform
-## Database Design Document (Final — TimescaleDB)
+## Database Design Document (TimescaleDB)
+
+**Status:** Design for a **future, unimplemented** module — see notice below
+
+> **Status notice (this revision):** this document describes the persistence
+> layer of the optional queue transport + Worker pipeline. **None of it is
+> implemented as of this revision.** The SDK (`@tnet06/mapa-audit-sdk`) is
+> implemented and usable today with zero infrastructure via its console and
+> file transports — see `sdk-architecture.md`. This document should be read
+> as forward-looking design for a future, separate, opt-in module — see
+> `platform-general-overview.md` §4. Three reconciliation notes relative to
+> the current SDK's `AuditEvent` shape are called out inline below, and
+> repeated in `docs/BUILD_PLAN.md` Phase 10, to be resolved before this schema
+> is implemented.
 
 ### Purpose
 
@@ -30,7 +43,7 @@ This replaces the manual `PARTITION BY RANGE` + `pg_partman` + cron-job setup th
 - **Native compression** of older chunks (often 90%+ size reduction) for cheap long-term storage.
 - **Continuous aggregates** — self-updating materialized views, ideal for Grafana dashboards over large volumes.
 
-**Durability scope (important):** TimescaleDB is PostgreSQL underneath and inherits its full durability guarantees (WAL, ACID) — once an event is inserted, it is safely persisted. However, guaranteeing that *no event is ever lost end-to-end* is a property of the whole pipeline (SDK → RabbitMQ → Worker → DB), **not** of the database. The SDK's in-memory buffer is best-effort (see Platform Design Overview §6). The hypertable guarantees that what arrives is stored durably and scales; it does not, and cannot, prevent loss upstream of itself.
+**Durability scope (important):** TimescaleDB is PostgreSQL underneath and inherits its full durability guarantees (WAL, ACID) — once an event is inserted, it is safely persisted. However, guaranteeing that *no event is ever lost end-to-end* is a property of the whole pipeline (SDK → queue transport → Worker → DB), **not** of the database. As of this revision, the SDK has no queue transport and no in-memory buffering of any kind — that behavior, if any, will be specified in the future queue transport's own design (see `rabbitmq-worker-architecture.md` §1). The hypertable guarantees that what arrives is stored durably and scales; it does not, and cannot, prevent loss upstream of itself.
 
 ---
 
@@ -44,27 +57,32 @@ Advantages: one insert per event, simpler idempotency, no joins to reconstruct a
 
 ### Main Table
 
+> **Reconciliation notes (read before implementing):** three columns below
+> need adjustment against the current SDK `AuditEvent` shape
+> (`sdk-architecture.md` §4). They are marked inline with ⚠ and summarized
+> after the table.
+
 ```sql
 -- Requires: CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 CREATE TABLE audit_events (
     -- IMPORTANT: id is generated client-side by the SDK, before publishing
-    -- to RabbitMQ. This is what makes idempotent inserts possible on
+    -- to the queue. This is what makes idempotent inserts possible on
     -- redelivery. See "Idempotency Design" below.
     id              UUID NOT NULL,
 
     -- Correlation & causality
-    correlation_id  UUID NOT NULL,   -- groups all events of one request/workflow
-    causation_id    UUID,            -- the event that directly caused this one
-    request_id      UUID,
-    trace_id        TEXT,            -- reserved for OpenTelemetry
-    span_id         TEXT,            -- reserved for OpenTelemetry
+    correlation_id  UUID,             -- ⚠ nullable — see note 1 below
+    causation_id    UUID,             -- the event that directly caused this one
+    request_id      UUID,             -- ⚠ see note 2 below (not in AuditEvent today)
+    trace_id        TEXT,             -- reserved for OpenTelemetry (not in AuditEvent today)
+    span_id         TEXT,             -- reserved for OpenTelemetry (not in AuditEvent today)
 
     -- Origin
     service_name    TEXT NOT NULL,
     service_version TEXT,            -- correlate incidents with deploys
     instance_id     TEXT,            -- specific replica/pod/container
-    server_name     TEXT,            -- hostname (may rotate in ephemeral envs)
+    server_name     TEXT,            -- ⚠ see note 2 below (not in AuditEvent today)
     environment     TEXT NOT NULL,
 
     -- Classification (event_type = domain, severity = gravity, outcome = result)
@@ -79,12 +97,12 @@ CREATE TABLE audit_events (
     user_role       TEXT,
     tenant_id       TEXT,
 
-    -- HTTP Context (populated only for event_type = 'request')
+    -- HTTP Context (populated whenever request context was captured — see note 3)
     http_method     TEXT,
     endpoint        TEXT,
     route_pattern   TEXT,
-    status_code     INT,
-    duration_ms     INT,
+    status_code     INT,             -- ⚠ see note 2 below (not in AuditEvent today)
+    duration_ms     INT,             -- ⚠ see note 2 below (not in AuditEvent today)
     ip_address      INET,
     user_agent      TEXT,
 
@@ -100,7 +118,7 @@ CREATE TABLE audit_events (
 
     -- Timestamps
     occurred_at     TIMESTAMPTZ NOT NULL,   -- when it happened (set by SDK)
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),  -- when persisted
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),  -- when persisted (DB-side; not an AuditEvent field)
 
     -- The partitioning column (occurred_at) must be part of any unique/primary key.
     PRIMARY KEY (occurred_at, id),
@@ -127,6 +145,40 @@ SELECT create_hypertable(
 
 The `PRIMARY KEY (occurred_at, id)` requirement is the same as with native partitioning: TimescaleDB requires the partitioning column (`occurred_at`) to be part of any unique or primary key. This also makes the idempotent `ON CONFLICT (occurred_at, id)` insert work cleanly.
 
+**Reconciliation notes:**
+
+1. **`correlation_id` must be nullable, not `NOT NULL`.** In the current SDK,
+   `AuditEvent.correlationId` is optional — an event recorded outside any
+   request context (e.g. a background job using `createAudit()` directly, with
+   no adapter populating context) legitimately has no correlation ID. A
+   `NOT NULL` constraint here would reject valid events the SDK can produce
+   today. Loosen this constraint, or have the Worker generate a fallback ID
+   for events that arrive without one (if a non-null value is preferred for
+   query ergonomics) — a decision to make explicitly before Phase 10, not a
+   given.
+2. **Several columns have no corresponding field in the current `AuditEvent`**:
+   `request_id`, `trace_id`, `span_id`, `server_name`, `status_code`,
+   `duration_ms`. These were anticipated for future SDK capability
+   (OpenTelemetry integration, HTTP response timing) that does not exist yet.
+   They are not wrong to keep as forward-looking columns, but the Worker
+   cannot populate them from what the SDK sends today — they will be `NULL`
+   for every row until the SDK grows fields to fill them, or they map from
+   something the queue transport/Worker derives independently (e.g.
+   `duration_ms` would need to be measured by an adapter around the request,
+   which the SDK does not do today). `created_at` is not part of this list —
+   it is correctly DB-side only (set by the Worker on insert), never an
+   `AuditEvent` field, and needs no reconciliation.
+3. **HTTP context is not scoped to `event_type='request'` in the current SDK.**
+   The Express adapter attaches `request` context (method, endpoint, IP, user
+   agent) to *any* event recorded during a request — `business`, `security`,
+   `system`, whatever `eventType` the caller chooses — not only to a
+   dedicated `'request'` event type. In practice, most events captured during
+   an HTTP request will have these columns populated regardless of
+   `event_type`. The "populated only for `event_type='request'`" framing in
+   earlier drafts does not match this — treat these columns as "populated
+   whenever request context was available when the event was recorded," not
+   as type-gated.
+
 ---
 
 ### Retention & Compression Policies (TimescaleDB-native)
@@ -152,7 +204,7 @@ SELECT add_compression_policy('audit_events', INTERVAL '30 days');
 
 ### Idempotency Design
 
-RabbitMQ guarantees *at-least-once* delivery, so the same event can arrive more than once (consumer restarts, redeliveries). The SDK generates each event's `id` before publishing; the Worker inserts idempotently:
+The queue guarantees *at-least-once* delivery, so the same event can arrive more than once (consumer restarts, redeliveries). The SDK generates each event's `id` before publishing; the Worker inserts idempotently:
 
 ```sql
 INSERT INTO audit_events (id, correlation_id, ..., occurred_at)
@@ -160,7 +212,7 @@ VALUES ($1, $2, ..., $N)
 ON CONFLICT (occurred_at, id) DO NOTHING;
 ```
 
-Where `id` is generated is a fixed platform-wide contract — a correctness guarantee, not an implementation detail.
+Where `id` is generated is a fixed platform-wide contract — a correctness guarantee, not an implementation detail. (This already holds true today: `id` is generated client-side by `buildAuditEvent()` in the SDK, independent of whether the queue/Worker/DB module exists — see `sdk-architecture.md` §4.)
 
 ---
 
@@ -188,15 +240,15 @@ Where `id` is generated is a fixed platform-wide contract — a correctness guar
 
 ### Column Design
 
-**Correlation & causality** — `correlation_id` groups a whole flow; `causation_id` links an event to the one that directly caused it (walk the causal chain); `request_id` identifies a single request; `trace_id`/`span_id` reserved for OpenTelemetry.
+**Correlation & causality** — `correlation_id` groups a whole flow when present (see reconciliation note 1 — it is optional, not guaranteed); `causation_id` links an event to the one that directly caused it (walk the causal chain); `request_id` identifies a single request; `trace_id`/`span_id` reserved for OpenTelemetry (see reconciliation note 2 — none of these three exist in the SDK's event shape today).
 
-**Origin** — `service_name` + `service_version` answer "did this start after the last deploy?"; `instance_id` isolates a single misbehaving replica; `server_name` is the hostname (rotates in containers); `environment` is constrained.
+**Origin** — `service_name` + `service_version` answer "did this start after the last deploy?"; `instance_id` isolates a single misbehaving replica; `server_name` is the hostname (rotates in containers; see reconciliation note 2 — not populated by the SDK today); `environment` is constrained.
 
 **Classification** — `event_type`, `event_name`, `severity`, `outcome` per the rules above. `event_name` examples: `recipe.created`, `auth.failed_login`, `http.request.completed`.
 
 **Actor** — `actor_type` (`user`/`service`/`system`/`job`) ensures machine-originated events aren't left with an unexplained NULL user; `user_id` doubles as the generic actor id; `user_role`/`tenant_id` give authz and tenancy context.
 
-**HTTP Context** — regular columns because queried frequently; only populated for `event_type='request'`. `route_pattern` (`/users/:userId/orders/:orderId`) groups dynamic URLs so dashboards aggregate meaningfully instead of exploding per unique ID.
+**HTTP Context** — regular columns because queried frequently; populated whenever request context was available when the event was recorded (see reconciliation note 3 — not gated to `event_type='request'`). `route_pattern` (`/users/:userId/orders/:orderId`) groups dynamic URLs so dashboards aggregate meaningfully instead of exploding per unique ID. `status_code`/`duration_ms` are not populated by the SDK today (reconciliation note 2).
 
 **Entity** — `entity_type`/`entity_id` enable "full history of recipe 123":
 
@@ -206,7 +258,7 @@ WHERE entity_type = 'recipe' AND entity_id = '123'
 ORDER BY occurred_at DESC;
 ```
 
-**Payload & governance** — `payload` (JSONB) holds event-specific detail (stack traces, changed fields) so new types need no migrations; `payload_schema_version` lets consumers branch on payload shape as it evolves.
+**Payload & governance** — `payload` (JSONB) holds event-specific detail (stack traces, changed fields) so new types need no migrations; `payload_schema_version` lets consumers branch on payload shape as it evolves. Note: the SDK's `AuditEvent.payloadSchemaVersion` exists on the type but is not currently set by `record()`/`RecordInput` — the Worker should not assume every incoming message populates it, and the `DEFAULT 1` here is the practical fallback until the SDK exposes a way to set it explicitly.
 
 ```json
 // error payload
@@ -220,7 +272,7 @@ ORDER BY occurred_at DESC;
 ### Time Columns
 
 - `occurred_at`: when the event happened (set by SDK) — the hypertable's chunking column.
-- `created_at`: when it was persisted.
+- `created_at`: when it was persisted (set by the Worker/DB on insert; not part of `AuditEvent`).
 
 Asynchronous ingestion means these diverge during backlog; keeping both separates real timing from pipeline delay. Chunking by `occurred_at` is correct because queries ask about business time.
 
@@ -256,7 +308,7 @@ CREATE INDEX idx_audit_events_payload_gin
 
 ### Nullable Columns
 
-Intentionally sparse by design: HTTP fields apply only to `event_type='request'`; `actor_type`/`user_id` are NULL for anonymous or pre-auth events. Expected, not a defect — document it in onboarding.
+Intentionally sparse by design: HTTP fields apply whenever request context was captured (see reconciliation note 3); `actor_type`/`user_id` are NULL for anonymous or pre-auth events; `correlation_id` is NULL for events recorded outside any request context (reconciliation note 1). Expected, not a defect — document it in onboarding.
 
 ---
 
@@ -292,3 +344,7 @@ Stores events that failed processing, for retries and diagnostics. Independent f
 ### Summary
 
 Built on TimescaleDB, this design treats the audit/observability stream as what it is — time-series data — and gets automatic chunking, retention, and compression instead of hand-rolled partition management. A single `audit_events` hypertable, backed by strong constraints, client-generated idempotent identity, explicit classification rules, an investigation-ready metadata set (outcome/actor/causality/instance), schema-versioned JSONB, and native retention/compression policies, provides a scalable, production-ready foundation for a reusable platform engineering solution — while being explicit that end-to-end no-loss durability is a pipeline concern, not a database one.
+
+Three reconciliation gaps against the current SDK (see notes above) should be
+resolved as part of Phase 10 implementation, not before — this document
+remains valid forward-looking design in the meantime.
