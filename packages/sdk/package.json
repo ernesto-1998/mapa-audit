@@ -18,6 +18,10 @@
       "types": "./dist/adapters/express.d.ts",
       "import": "./dist/adapters/express.js"
     },
+    "./fastify": {
+      "types": "./dist/adapters/fastify.d.ts",
+      "import": "./dist/adapters/fastify.js"
+    },
     "./nestjs": {
       "types": "./dist/adapters/nestjs.d.ts",
       "import": "./dist/adapters/nestjs.js"
@@ -39,18 +43,23 @@
     "@nestjs/testing": "^11.1.28",
     "@types/express": "^5.0.6",
     "@types/supertest": "^7.2.1",
+    "fastify": "^5.10.0",
     "reflect-metadata": "^0.2.0",
     "supertest": "^7.2.2"
   },
   "peerDependencies": {
     "@nestjs/common": "^10.0.0 || ^11.0.0",
-    "express": "^4.0.0 || ^5.0.0"
+    "express": "^4.0.0 || ^5.0.0",
+    "fastify": "^4.0.0 || ^5.0.0"
   },
   "peerDependenciesMeta": {
     "@nestjs/common": {
       "optional": true
     },
     "express": {
+      "optional": true
+    },
+    "fastify": {
       "optional": true
     }
   }
