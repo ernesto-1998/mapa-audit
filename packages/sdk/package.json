@@ -44,6 +44,7 @@
     "@types/express": "^5.0.6",
     "@types/supertest": "^7.2.1",
     "fastify": "^5.10.0",
+    "fastify4": "npm:fastify@^4.29.1",
     "reflect-metadata": "^0.2.0",
     "supertest": "^7.2.2"
   },
