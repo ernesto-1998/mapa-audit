@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { contextStore, getContext } from '../../src/core/storage.js';
+import { contextStore, getContext, setActor } from '../../src/core/storage.js';
 import type { RequestContext } from '../../src/core/storage.js';
 
 async function readContextDeeply(): Promise<RequestContext | undefined> {
@@ -67,5 +67,75 @@ describe('context storage', () => {
 
   it('returns undefined outside a context', () => {
     expect(getContext()).toBeUndefined();
+  });
+
+  it('updates actor inside an active context', () => {
+    const context: RequestContext = {
+      correlationId: 'request-1'
+    };
+
+    contextStore.run(context, () => {
+      setActor({
+        type: 'user',
+        userId: 'user-1',
+        userRole: 'admin'
+      });
+
+      expect(getContext()?.actor).toEqual({
+        type: 'user',
+        userId: 'user-1',
+        userRole: 'admin'
+      });
+    });
+  });
+
+  it('replaces the previous actor without merging fields', () => {
+    const context: RequestContext = {
+      correlationId: 'request-1',
+      actor: {
+        type: 'user',
+        userId: 'user-1',
+        userRole: 'admin',
+        tenantId: 'tenant-1'
+      }
+    };
+
+    contextStore.run(context, () => {
+      setActor({
+        type: 'service',
+        userId: 'service-1'
+      });
+
+      expect(getContext()?.actor).toEqual({
+        type: 'service',
+        userId: 'service-1'
+      });
+    });
+  });
+
+  it('clears the actor when setActor receives undefined', () => {
+    const context: RequestContext = {
+      correlationId: 'request-1',
+      actor: {
+        type: 'user',
+        userId: 'user-1'
+      }
+    };
+
+    contextStore.run(context, () => {
+      setActor(undefined);
+
+      expect(getContext()?.actor).toBeUndefined();
+      expect(Object.hasOwn(getContext() ?? {}, 'actor')).toBe(false);
+    });
+  });
+
+  it('does not throw when called outside an active context', () => {
+    expect(() => {
+      setActor({
+        type: 'user',
+        userId: 'user-1'
+      });
+    }).not.toThrow();
   });
 });

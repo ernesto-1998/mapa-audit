@@ -13,6 +13,7 @@ export {
   shutdownGlobalAudit
 } from './core/global-audit.js';
 export { record } from './core/record.js';
+export { setActor } from './core/storage.js';
 
 export type {
   ActorType,

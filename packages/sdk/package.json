@@ -34,8 +34,13 @@
   },
   "devDependencies": {
     "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.1.28",
+    "@nestjs/platform-express": "^11.1.28",
+    "@nestjs/testing": "^11.1.28",
+    "@types/express": "^5.0.6",
+    "@types/supertest": "^7.2.1",
     "reflect-metadata": "^0.2.0",
-    "@types/express": "^5.0.6"
+    "supertest": "^7.2.2"
   },
   "peerDependencies": {
     "@nestjs/common": "^10.0.0 || ^11.0.0",
