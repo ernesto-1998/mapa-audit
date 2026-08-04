@@ -1,21 +1,22 @@
 # Audit & Business Observability Platform
 ## RabbitMQ + Worker Architecture Document
 
-**Status:** Design for a **future, unimplemented** module — see notice below
+**Status:** SDK-side publisher **implemented**; the Worker/DB consuming side
+described below is a **future, unimplemented** design — see notice below
 **Audience:** Engineering
 **Companion to:** Platform Design Overview, Database Design (TimescaleDB), SDK Architecture
 
-> **Status notice (this revision):** this document describes the design of the
-> optional queue transport + Worker + database persistence pipeline. **None of
-> it is implemented as of this revision.** The SDK (`@tnet06/mapa-audit-sdk`)
-> is implemented and usable today with zero infrastructure via its console and
-> file transports — see `sdk-architecture.md`. This document, along with
-> `database-design.md`, should be read as forward-looking design for a future,
-> separate, opt-in module (`@tnet06/mapa-audit-transport-queue` on the SDK
-> side, plus a standalone Worker service — see `platform-general-overview.md`
-> §4), not as current platform behavior. The topology, idempotency strategy,
-> and retry design below remain the intended approach when this module is
-> built.
+> **Status notice (this revision):** the RabbitMQ topology, idempotency
+> strategy, and retry design described in this document remain the intended
+> approach for the Worker, which is **not implemented**. What changed since
+> the previous revision: the **SDK-side publisher now exists** — it is
+> `@tnet06/mapa-audit-transport-rabbitmq`, an independent package (not
+> `@tnet06/mapa-audit-transport-queue`, the placeholder name used in earlier
+> drafts before it was built), and it publishes to the exact exchange/routing
+> key convention described in §3 below. The Worker, retry/DLQ processing, and
+> TimescaleDB persistence remain unbuilt. See `sdk-architecture.md` §10 for
+> the publisher's implementation details, and `platform-general-overview.md`
+> §4 for how the publisher and the still-future Worker relate.
 
 ---
 
@@ -28,13 +29,13 @@ This is the layer where the platform's two central promises are actually enforce
 - **No duplicate rows**, even though delivery is at-least-once.
 - **No silently lost messages** on the *processing* side — anything the Worker can't handle ends up in the DLQ, never dropped.
 
-(Note the boundary: **as of this revision, the SDK has no queue transport and
-no in-memory buffering of any kind** — that earlier claim was inaccurate and
-has been removed. When the queue transport is built, its buffering/backpressure
-behavior on the SDK side, if any, will be specified in the queue transport's
-own design, not assumed here. From the moment a message is durably in
-RabbitMQ onward, this document's guarantees apply — that boundary is still
-correct in principle, there is simply no SDK-side buffer preceding it today.)
+(Note the boundary: the SDK-side publisher (`RabbitMQTransport`) is
+publish-only and does no in-memory buffering of its own — a message either
+reaches RabbitMQ or its publish failure is reported via
+`process.emitWarning` (see `sdk-architecture.md` §10). From the moment a
+message is durably in RabbitMQ onward, this document's guarantees apply —
+everything from here on describes the **Worker side**, which does not exist
+yet.)
 
 ---
 
@@ -83,26 +84,33 @@ correct in principle, there is simply no SDK-side buffer preceding it today.)
              back to audit.events        (operational review)
 ```
 
+**Implemented today:** the `SDK ──publish──▶ audit.events (exchange)` leg —
+`RabbitMQTransport` declares this exact exchange (topic, durable) and
+publishes with the routing key convention below. **Not implemented:** the
+queue, its dead-letter wiring, and everything from the Worker onward.
+
 #### 3.1 Exchange: `audit.events` (topic)
 
 - **Type:** `topic`. The routing key is the event's `event_type` (`business`, `error`, `security`, etc.).
 - **Mapping note:** the SDK's canonical `AuditEvent` field is `eventType`
   (camelCase, as with all `AuditEvent` fields — see `sdk-architecture.md` §4).
   The queue/DB layer's convention is snake_case (`event_type`, matching the DB
-  column naming in `database-design.md`). The queue transport, when built, is
-  responsible for this translation when publishing — routing key and any
-  serialized message fields use snake_case; the SDK's in-process event object
-  never does. This applies to field names generally at this boundary, not only
-  `event_type`.
+  column naming in `database-design.md`). **This translation is implemented**:
+  `RabbitMQTransport` converts `eventType` to snake_case for the routing key
+  via a generic `camelToSnakeCase()` helper; the published message *body*
+  keeps the `AuditEvent` as-is in camelCase, untransformed — only the routing
+  key changes. This applies to the routing key specifically; a future Worker
+  reading the message body still receives camelCase keys and would need its
+  own mapping to snake_case DB columns if it wants that convention throughout.
 - **Why topic and not direct/fanout:** a topic exchange costs nothing today (a single queue binds with `#` to receive everything) but leaves the door open, without redesign, to add future consumers that subscribe to only certain event types — e.g. a real-time security-alerting consumer binding to `security.*`, or a metrics consumer. This is the routing flexibility that motivated choosing RabbitMQ over a simpler job queue.
 
-#### 3.2 Main Queue: `audit.events.q`
+#### 3.2 Main Queue: `audit.events.q`  *(not implemented)*
 
 - **Durable:** survives broker restarts.
 - **Bound** to `audit.events` with routing key `#` (all events).
 - Declared with `x-dead-letter-exchange = audit.retry.dlx`, so rejected/failed messages are routed into the retry/DLQ path rather than lost.
 
-#### 3.3 Retry & Dead-Letter path
+#### 3.3 Retry & Dead-Letter path  *(not implemented)*
 
 - **`audit.retry.dlx` (direct exchange):** receives dead-lettered messages and routes them either to the retry queue (transient failures) or the terminal dead queue (permanent failures), based on retry count.
 - **`audit.retry.q`:** a holding queue with a message TTL (e.g. 30s). When the TTL expires, messages dead-letter *back* to `audit.events` for another processing attempt. This implements **delayed retry without blocking the main queue** — the classic RabbitMQ TTL-requeue pattern.
@@ -110,7 +118,7 @@ correct in principle, there is simply no SDK-side buffer preceding it today.)
 
 ---
 
-### 4. Worker Responsibilities
+### 4. Worker Responsibilities  *(not implemented — design only)*
 
 The Worker is a standalone service (its own process/container, never embedded in a consuming app, and never published as an npm package — see `platform-general-overview.md` §4). Its loop:
 
@@ -121,11 +129,11 @@ The Worker is a standalone service (its own process/container, never embedded in
 
 The Worker is intentionally the *only* component that writes to the database. Consuming services never touch Postgres directly — this keeps the storage contract in one place and lets the schema evolve without coordinating with every consumer.
 
-The Worker described here is a **reference implementation**. A team adopting the queue transport is not required to run this exact Worker — the real contract is the shape of the message on the queue (the shared `AuditEvent` type, translated per §3.1), not a code dependency on this specific service. Teams with different persistence needs can write their own consumer against the same queue.
+The Worker described here is a **reference implementation**. A team adopting the RabbitMQ transport is not required to run this exact Worker — the real contract is the shape of the message on the queue (the shared `AuditEvent` type, with the snake_case routing key already implemented per §3.1), not a code dependency on this specific service. Teams with different persistence needs can write their own consumer against the same queue.
 
 ---
 
-### 5. Message Validation
+### 5. Message Validation  *(not implemented — design only)*
 
 Before any DB work, the Worker validates each message against the expected `AuditEvent` shape (a schema check — e.g. Zod/JSON-schema). This produces a clean fork:
 
@@ -134,7 +142,7 @@ Before any DB work, the Worker validates each message against the expected `Audi
 
 ---
 
-### 6. Persistence & Idempotency
+### 6. Persistence & Idempotency  *(not implemented — design only)*
 
 The Worker persists using the client-generated `id` and the `ON CONFLICT` guarantee established in the SDK and DB designs:
 
@@ -147,6 +155,11 @@ ON CONFLICT (occurred_at, id) DO NOTHING;
 
 Because delivery is at-least-once, a redelivered message carries the *same* `id`; the `ON CONFLICT (occurred_at, id) DO NOTHING` makes the second insert a no-op. **Idempotency is achieved at the database level, not by tracking "seen" IDs in Worker memory** — which matters because the Worker may be horizontally scaled (multiple instances consuming the same queue), and in-memory dedup wouldn't be shared across them. The DB is the single source of truth for "have I seen this event."
 
+The client-side half of this contract is already true today: `id` is
+generated by the SDK (`randomUUID()` in `buildAuditEvent()`) before an event
+ever reaches a transport, RabbitMQ or otherwise — see `sdk-architecture.md`
+§5.4.
+
 #### 6.1 Batched inserts (throughput)
 
 For high volume, the Worker accumulates valid events in a small in-memory batch and flushes them in a single multi-row insert (e.g. every 100 events or every 500ms, whichever comes first). Notes:
@@ -157,7 +170,7 @@ For high volume, the Worker accumulates valid events in a small in-memory batch 
 
 ---
 
-### 7. Retry Policy
+### 7. Retry Policy  *(not implemented — design only)*
 
 Failures are classified, and the classification decides the path:
 
@@ -177,7 +190,7 @@ This gives **exponential-ish delayed retry** (by using tiered retry queues with 
 
 ---
 
-### 8. Dead Letter Handling
+### 8. Dead Letter Handling  *(not implemented — design only)*
 
 Messages in `audit.dead.q` are consumed by the Worker (or a dedicated small drainer) and written to the `dead_letter_events` table:
 
@@ -191,29 +204,30 @@ This table is the operational surface for failures: engineers query it to see *w
 
 ---
 
-### 9. Backpressure & Concurrency
+### 9. Backpressure & Concurrency  *(not implemented — design only, except where noted)*
 
 - **Prefetch (`prefetch=N`):** the Worker fetches at most N unacked messages at a time (e.g. 50), preventing a burst from overwhelming it or exhausting the DB connection pool. This is the same backpressure pattern used elsewhere in this codebase.
 - **Horizontal scaling:** multiple Worker instances can consume the same `audit.events.q` competing-consumer style. Idempotency (DB-level) and the stateless Worker design make this safe with no coordination.
-- **Connection management:** a single long-lived connection with a channel per concurrency unit, via `amqp-connection-manager` for automatic reconnection.
+- **Connection management:** a single long-lived connection with a channel per concurrency unit, via `amqp-connection-manager` for automatic reconnection. **Implemented on the publish side today** — `RabbitMQTransport` already uses `amqp-connection-manager` for the same reason (automatic reconnection); a future Worker would use it the same way for consumption.
 
 ---
 
-### 10. Failure Modes Summary
+### 10. Failure Modes Summary  *(mixed — see each row)*
 
-| Scenario | Behavior |
-|---|---|
-| Message redelivered (at-least-once) | Deduplicated at insert via `ON CONFLICT` — no duplicate row |
-| Malformed / invalid message | Straight to terminal DLQ; never retried, never blocks queue |
-| DB transiently down | Message retried with delay via retry queue; recovers when DB returns |
-| DB down beyond max retries | Message lands in `dead_letter_events` for manual replay |
-| Worker crashes mid-batch | Un-acked messages redelivered by RabbitMQ; idempotency makes reprocessing safe |
-| Burst of traffic | Prefetch limits in-flight work; queue absorbs the burst; Workers drain at safe rate |
-| Multiple Workers running | Safe — competing consumers + DB-level idempotency, no shared state needed |
+| Scenario | Behavior | Status |
+|---|---|---|
+| Publish fails (broker unreachable, etc.) | Caught, reported via `process.emitWarning`, never thrown into the host app | ✅ Implemented (`RabbitMQTransport`) |
+| Message redelivered (at-least-once) | Deduplicated at insert via `ON CONFLICT` — no duplicate row | 🔜 Design only |
+| Malformed / invalid message | Straight to terminal DLQ; never retried, never blocks queue | 🔜 Design only |
+| DB transiently down | Message retried with delay via retry queue; recovers when DB returns | 🔜 Design only |
+| DB down beyond max retries | Message lands in `dead_letter_events` for manual replay | 🔜 Design only |
+| Worker crashes mid-batch | Un-acked messages redelivered by RabbitMQ; idempotency makes reprocessing safe | 🔜 Design only |
+| Burst of traffic | Prefetch limits in-flight work; queue absorbs the burst; Workers drain at safe rate | 🔜 Design only |
+| Multiple Workers running | Safe — competing consumers + DB-level idempotency, no shared state needed | 🔜 Design only |
 
 ---
 
-### 11. Pipeline Observability
+### 11. Pipeline Observability  *(not implemented — design only)*
 
 The Worker exposes metrics (Prometheus-style, consistent with the platform's Grafana stack) so the pipeline can watch itself:
 

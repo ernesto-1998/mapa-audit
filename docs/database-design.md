@@ -4,14 +4,16 @@
 **Status:** Design for a **future, unimplemented** module — see notice below
 
 > **Status notice (this revision):** this document describes the persistence
-> layer of the optional queue transport + Worker pipeline. **None of it is
-> implemented as of this revision.** The SDK (`@tnet06/mapa-audit-sdk`) is
-> implemented and usable today with zero infrastructure via its console and
-> file transports — see `sdk-architecture.md`. This document should be read
-> as forward-looking design for a future, separate, opt-in module — see
+> layer of the Worker, which is **not implemented**. The SDK
+> (`@tnet06/mapa-audit-sdk`) is implemented and usable today with zero
+> infrastructure via its console and file transports, and the RabbitMQ
+> **publisher** (`@tnet06/mapa-audit-transport-rabbitmq`) is also implemented
+> and usable — see `sdk-architecture.md`. Neither of those persists anything;
+> this document describes the schema a future Worker would write to once
+> built. Read as forward-looking design for that remaining piece — see
 > `platform-general-overview.md` §4. Three reconciliation notes relative to
 > the current SDK's `AuditEvent` shape are called out inline below, and
-> repeated in `docs/BUILD_PLAN.md` Phase 10, to be resolved before this schema
+> repeated in `docs/BUILD_PLAN.md` Phase 12, to be resolved before this schema
 > is implemented.
 
 ### Purpose
@@ -43,7 +45,7 @@ This replaces the manual `PARTITION BY RANGE` + `pg_partman` + cron-job setup th
 - **Native compression** of older chunks (often 90%+ size reduction) for cheap long-term storage.
 - **Continuous aggregates** — self-updating materialized views, ideal for Grafana dashboards over large volumes.
 
-**Durability scope (important):** TimescaleDB is PostgreSQL underneath and inherits its full durability guarantees (WAL, ACID) — once an event is inserted, it is safely persisted. However, guaranteeing that *no event is ever lost end-to-end* is a property of the whole pipeline (SDK → queue transport → Worker → DB), **not** of the database. As of this revision, the SDK has no queue transport and no in-memory buffering of any kind — that behavior, if any, will be specified in the future queue transport's own design (see `rabbitmq-worker-architecture.md` §1). The hypertable guarantees that what arrives is stored durably and scales; it does not, and cannot, prevent loss upstream of itself.
+**Durability scope (important):** TimescaleDB is PostgreSQL underneath and inherits its full durability guarantees (WAL, ACID) — once an event is inserted, it is safely persisted. However, guaranteeing that *no event is ever lost end-to-end* is a property of the whole pipeline (SDK → `RabbitMQTransport` → RabbitMQ → Worker → DB), **not** of the database. The SDK-side publisher (`RabbitMQTransport`) is implemented and publish-only: it does no in-memory buffering, and reports publish failures via `process.emitWarning` rather than silently dropping them (see `sdk-architecture.md` §10). The Worker that would consume from RabbitMQ and write to this hypertable does not exist yet. The hypertable itself guarantees that what arrives is stored durably and scales; it does not, and cannot, prevent loss upstream of itself — and today, there is no Worker downstream of the publisher to receive anything in the first place.
 
 ---
 
@@ -154,7 +156,7 @@ The `PRIMARY KEY (occurred_at, id)` requirement is the same as with native parti
    `NOT NULL` constraint here would reject valid events the SDK can produce
    today. Loosen this constraint, or have the Worker generate a fallback ID
    for events that arrive without one (if a non-null value is preferred for
-   query ergonomics) — a decision to make explicitly before Phase 10, not a
+   query ergonomics) — a decision to make explicitly before Phase 12, not a
    given.
 2. **Several columns have no corresponding field in the current `AuditEvent`**:
    `request_id`, `trace_id`, `span_id`, `server_name`, `status_code`,
@@ -169,15 +171,18 @@ The `PRIMARY KEY (occurred_at, id)` requirement is the same as with native parti
    it is correctly DB-side only (set by the Worker on insert), never an
    `AuditEvent` field, and needs no reconciliation.
 3. **HTTP context is not scoped to `event_type='request'` in the current SDK.**
-   The Express adapter attaches `request` context (method, endpoint, IP, user
-   agent) to *any* event recorded during a request — `business`, `security`,
-   `system`, whatever `eventType` the caller chooses — not only to a
-   dedicated `'request'` event type. In practice, most events captured during
-   an HTTP request will have these columns populated regardless of
-   `event_type`. The "populated only for `event_type='request'`" framing in
-   earlier drafts does not match this — treat these columns as "populated
-   whenever request context was available when the event was recorded," not
-   as type-gated.
+   All three framework adapters (Express, NestJS, Fastify) attach `request`
+   context (method, endpoint, IP, user agent) to *any* event recorded during a
+   request — `business`, `security`, `system`, whatever `eventType` the caller
+   chooses — not only to a dedicated `'request'` event type. In practice, most
+   events captured during an HTTP request will have these columns populated
+   regardless of `event_type`. The "populated only for `event_type='request'`"
+   framing in earlier drafts does not match this — treat these columns as
+   "populated whenever request context was available when the event was
+   recorded," not as type-gated. Note also that the NestJS adapter does not
+   populate `route_pattern` specifically (a documented adapter trade-off, see
+   `sdk-architecture.md` §7.2) — expect it `NULL` for events captured via
+   that adapter even when other HTTP context fields are present.
 
 ---
 
@@ -212,7 +217,7 @@ VALUES ($1, $2, ..., $N)
 ON CONFLICT (occurred_at, id) DO NOTHING;
 ```
 
-Where `id` is generated is a fixed platform-wide contract — a correctness guarantee, not an implementation detail. (This already holds true today: `id` is generated client-side by `buildAuditEvent()` in the SDK, independent of whether the queue/Worker/DB module exists — see `sdk-architecture.md` §4.)
+Where `id` is generated is a fixed platform-wide contract — a correctness guarantee, not an implementation detail. **The client side of this contract is already true today and does not depend on the Worker existing:** `id` is generated client-side by `buildAuditEvent()` in the SDK (`randomUUID()`), before the event ever reaches any transport — console, file, or the implemented `RabbitMQTransport` — see `sdk-architecture.md` §5.4. The `ON CONFLICT` half of the contract, which relies on this `id`, remains unimplemented along with the rest of the Worker.
 
 ---
 
@@ -246,9 +251,9 @@ Where `id` is generated is a fixed platform-wide contract — a correctness guar
 
 **Classification** — `event_type`, `event_name`, `severity`, `outcome` per the rules above. `event_name` examples: `recipe.created`, `auth.failed_login`, `http.request.completed`.
 
-**Actor** — `actor_type` (`user`/`service`/`system`/`job`) ensures machine-originated events aren't left with an unexplained NULL user; `user_id` doubles as the generic actor id; `user_role`/`tenant_id` give authz and tenancy context.
+**Actor** — `actor_type` (`user`/`service`/`system`/`job`) ensures machine-originated events aren't left with an unexplained NULL user; `user_id` doubles as the generic actor id; `user_role`/`tenant_id` give authz and tenancy context. Note that actor population also depends on adapter configuration: the SDK's default extraction follows the Passport.js convention (`req.user.id`/`req.user.role`); apps using other auth schemes (e.g. session-based auth storing the user elsewhere) need `extractActor` configured on their adapter, or these columns will be NULL even for authenticated requests — see `sdk-architecture.md` §7.
 
-**HTTP Context** — regular columns because queried frequently; populated whenever request context was available when the event was recorded (see reconciliation note 3 — not gated to `event_type='request'`). `route_pattern` (`/users/:userId/orders/:orderId`) groups dynamic URLs so dashboards aggregate meaningfully instead of exploding per unique ID. `status_code`/`duration_ms` are not populated by the SDK today (reconciliation note 2).
+**HTTP Context** — regular columns because queried frequently; populated whenever request context was available when the event was recorded (see reconciliation note 3 — not gated to `event_type='request'`, and NULL for `route_pattern` specifically when captured via the NestJS adapter). `route_pattern` (`/users/:userId/orders/:orderId`) groups dynamic URLs so dashboards aggregate meaningfully instead of exploding per unique ID. `status_code`/`duration_ms` are not populated by the SDK today (reconciliation note 2).
 
 **Entity** — `entity_type`/`entity_id` enable "full history of recipe 123":
 
@@ -258,7 +263,7 @@ WHERE entity_type = 'recipe' AND entity_id = '123'
 ORDER BY occurred_at DESC;
 ```
 
-**Payload & governance** — `payload` (JSONB) holds event-specific detail (stack traces, changed fields) so new types need no migrations; `payload_schema_version` lets consumers branch on payload shape as it evolves. Note: the SDK's `AuditEvent.payloadSchemaVersion` exists on the type but is not currently set by `record()`/`RecordInput` — the Worker should not assume every incoming message populates it, and the `DEFAULT 1` here is the practical fallback until the SDK exposes a way to set it explicitly.
+**Payload & governance** — `payload` (JSONB) holds event-specific detail (stack traces, changed fields) so new types need no migrations; `payload_schema_version` lets consumers branch on payload shape as it evolves. Note: the SDK's `AuditEvent.payloadSchemaVersion` exists on the type but is not currently set by `record()`/`RecordInput` — the Worker should not assume every incoming message populates it, and the `DEFAULT 1` here is the practical fallback until the SDK exposes a way to set it explicitly. Separately: `payload` may contain masked fields (`'***'` in place of the original value) if the publishing service configured `maskedFields` — this happens before the event reaches any transport, so the Worker receives already-redacted data and cannot recover the original values, by design (see `sdk-architecture.md` §5.4).
 
 ```json
 // error payload
@@ -308,7 +313,7 @@ CREATE INDEX idx_audit_events_payload_gin
 
 ### Nullable Columns
 
-Intentionally sparse by design: HTTP fields apply whenever request context was captured (see reconciliation note 3); `actor_type`/`user_id` are NULL for anonymous or pre-auth events; `correlation_id` is NULL for events recorded outside any request context (reconciliation note 1). Expected, not a defect — document it in onboarding.
+Intentionally sparse by design: HTTP fields apply whenever request context was captured (see reconciliation note 3, including the NestJS `route_pattern` gap); `actor_type`/`user_id` are NULL for anonymous, pre-auth, or unconfigured-adapter events (see Column Design above); `correlation_id` is NULL for events recorded outside any request context (reconciliation note 1). Expected, not a defect — document it in onboarding.
 
 ---
 
@@ -346,5 +351,5 @@ Stores events that failed processing, for retries and diagnostics. Independent f
 Built on TimescaleDB, this design treats the audit/observability stream as what it is — time-series data — and gets automatic chunking, retention, and compression instead of hand-rolled partition management. A single `audit_events` hypertable, backed by strong constraints, client-generated idempotent identity, explicit classification rules, an investigation-ready metadata set (outcome/actor/causality/instance), schema-versioned JSONB, and native retention/compression policies, provides a scalable, production-ready foundation for a reusable platform engineering solution — while being explicit that end-to-end no-loss durability is a pipeline concern, not a database one.
 
 Three reconciliation gaps against the current SDK (see notes above) should be
-resolved as part of Phase 10 implementation, not before — this document
+resolved as part of Phase 12 implementation, not before — this document
 remains valid forward-looking design in the meantime.
