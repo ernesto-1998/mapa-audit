@@ -12,6 +12,22 @@ context capture, typed business/audit/security events, actor/entity separation,
 payload masking, payload size limits, and transports that receive one canonical
 event shape.
 
+## Contents
+
+- [Installation](#installation)
+- [Quickstart](#quickstart)
+- [Core Concepts](#core-concepts)
+- [Global API vs Creational API](#global-api-vs-creational-api)
+- [Public API Reference](#public-api-reference)
+- [Adapters](#adapters)
+- [Transports](#transports)
+- [Data Safety](#data-safety)
+- [Lifecycle and Graceful Shutdown](#lifecycle-and-graceful-shutdown)
+- [Errors and Warnings](#errors-and-warnings)
+- [Troubleshooting](#troubleshooting)
+- [Executable Examples](#executable-examples)
+- [Project Status and Roadmap](#project-status-and-roadmap)
+
 ## Installation
 
 This repository is currently a private monorepo. The packages have
@@ -38,6 +54,30 @@ npm test
 `@tnet06/mapa-audit-types` is a dependency of the SDK and usually does not need
 to be installed manually by application code. Custom transports should import
 `Transport` and `AuditEvent` directly from `@tnet06/mapa-audit-types`.
+
+Once the packages are published, install the SDK with only the framework you
+actually use:
+
+```sh
+npm install @tnet06/mapa-audit-sdk express
+npm install @tnet06/mapa-audit-sdk fastify
+npm install @tnet06/mapa-audit-sdk @nestjs/common
+```
+
+Those commands are examples for the future published package; they do not work
+against the public npm registry while this monorepo remains private.
+
+Express, Fastify, and `@nestjs/common` are optional peer dependencies of the SDK.
+Installing the SDK should not force a consumer app to install all three
+frameworks. Monorepo `devDependencies` exist only for developing and testing this
+repository and are not installed into consumer projects. Framework adapters are
+loaded through subpath exports:
+
+```ts
+import { expressAdapter } from '@tnet06/mapa-audit-sdk/express';
+import { fastifyAdapter } from '@tnet06/mapa-audit-sdk/fastify';
+import { AuditContextMiddleware } from '@tnet06/mapa-audit-sdk/nestjs';
+```
 
 ## Quickstart
 
@@ -140,6 +180,52 @@ interface AuditEvent {
 
 The event is nested in the SDK. Flattening happens only at output boundaries
 that need it, such as CSV.
+
+`AuditEvent` is the transport/consumer contract. It is not the same as
+`RecordInput`, which is the smaller object application code passes to
+`record()`. Some fields are part of the shared event contract but are not
+currently configurable through the SDK core:
+
+- `payloadSchemaVersion` exists on `AuditEvent`, but `RecordInput` does not yet
+  expose a way to set it.
+- `service.instanceId` exists on `AuditEvent`, but `AuditConfig` does not yet
+  configure it.
+
+Do not treat those fields as current core features unless a future release adds
+public configuration for them.
+
+### Classification Model
+
+The three classification fields are independent axes:
+
+| Field       | Meaning                 | Canonical values                                                      |
+| ----------- | ----------------------- | --------------------------------------------------------------------- |
+| `eventType` | Domain or category      | `request`, `business`, `audit`, `error`, `security`, `system`         |
+| `severity`  | Gravity of the event    | `debug`, `info`, `warn`, `error`, `critical`                          |
+| `outcome`   | Result of the operation | `success`, `failure`, `partial`; optional when there is no result yet |
+
+For example, a business operation can fail with high severity:
+
+```ts
+record({
+  eventType: 'business',
+  eventName: 'payment.capture_failed',
+  severity: 'error',
+  outcome: 'failure',
+  entity: { type: 'payment', id: 'pay-123' }
+});
+```
+
+A security event can also succeed and still be important:
+
+```ts
+record({
+  eventType: 'security',
+  eventName: 'mfa.challenge_passed',
+  severity: 'info',
+  outcome: 'success'
+});
+```
 
 ### Actor vs Entity
 
@@ -261,6 +347,67 @@ audit.record({
 await audit.shutdown();
 ```
 
+## Public API Reference
+
+### AuditConfig
+
+Used by `createAudit(config)` and `initGlobalAudit(config)`.
+
+| Field            | Required | Default                    | Notes                                                                   |
+| ---------------- | -------- | -------------------------- | ----------------------------------------------------------------------- |
+| `serviceName`    | Yes      | none                       | Non-empty string; invalid values throw during configuration             |
+| `serviceVersion` | No       | omitted                    | Written to `event.service.version` when provided                        |
+| `environment`    | Yes      | none                       | Must be `development`, `staging`, or `production`; invalid values throw |
+| `transports`     | No       | `[new ConsoleTransport()]` | Every event is sent to each transport in the array                      |
+| `maskedFields`   | No       | no masking                 | Dot-notation payload paths; array indexing is not supported             |
+| `maxPayloadSize` | No       | `1_000_000` bytes          | Inclusive byte limit for serialized payload after masking               |
+
+### RecordInput
+
+Passed to `record(input)` or `audit.record(input)`.
+
+| Field       | Required | Default | Notes                                                                             |
+| ----------- | -------- | ------- | --------------------------------------------------------------------------------- |
+| `eventType` | Yes      | none    | Must be one of the canonical event types; validated at runtime                    |
+| `eventName` | Yes      | none    | Non-empty application-defined name; validated at runtime                          |
+| `severity`  | No       | `info`  | If provided, must be one of the canonical severities; `null` is invalid           |
+| `outcome`   | No       | omitted | If provided, must be `success`, `failure`, or `partial`; `undefined` means absent |
+| `entity`    | No       | omitted | Domain object affected by the event                                               |
+| `payload`   | No       | `{}`    | Custom event data; masking and size limiting run before dispatch to any transport |
+
+Invalid `RecordInput` from JavaScript does not throw into application code. The
+event is discarded and one `[mapa-audit] failed to build audit event: ...`
+warning is emitted for that call.
+
+### AuditInstance
+
+Returned by `createAudit(config)`.
+
+| Method       | Behavior                                                                                                 |
+| ------------ | -------------------------------------------------------------------------------------------------------- |
+| `record()`   | Builds an `AuditEvent` and dispatches it fire-and-forget to the instance's transports                    |
+| `shutdown()` | Idempotently calls `close()` on transports that implement it; after it starts, `record()` is a no-op     |
+| `getInfo()`  | Returns `{ configured, serviceName, environment, transportCount }` without transports or mutable methods |
+
+`record()` contains `Transport.send()` errors and isolates each transport from
+the others. `shutdown()` can reject if a transport's `close()` rejects.
+
+### Global API
+
+| Function                | Behavior                                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------------------- |
+| `initGlobalAudit()`     | Creates the global singleton by delegating to `createAudit()`                               |
+| `record()`              | Delegates to the global instance; warns once and discards if the global was not initialized |
+| `getGlobalAudit()`      | Returns a read-only inspection snapshot or `undefined` when not initialized                 |
+| `shutdownGlobalAudit()` | Drains the current global instance if one exists; it does not clear/reset the singleton     |
+| `resetGlobalAudit()`    | Clears the global singleton and warning state; intended for tests or controlled reinit      |
+| `setActor()`            | Replaces the actor in the current request context; `setActor(undefined)` clears it          |
+
+`setActor()` outside an active request context is a silent no-op. It affects only
+the current `AsyncLocalStorage` context, so concurrent requests remain isolated.
+Use `resetGlobalAudit()` for test isolation; do not use `shutdownGlobalAudit()`
+as a reset substitute.
+
 ## Adapters
 
 Adapters capture request context only. They do not call `record()` and they do
@@ -296,6 +443,9 @@ app.use(expressAdapter());
 ```
 
 Express captures `request.routePattern` from `req.route?.path` when available.
+The adapter resolves it lazily, so the documented global registration style
+(`app.use(expressAdapter())` before routes) captures `/users/:id` for events
+recorded inside the matched route handler.
 
 Custom headers and session-based actor extraction:
 
@@ -463,6 +613,32 @@ outside an active request context is a silent no-op.
 Transports deliver already-built `AuditEvent` objects. They do not capture
 context.
 
+### Custom Transports
+
+The SDK core depends only on the shared `Transport` interface. A transport
+receives an `AuditEvent` after context capture, validation, masking, size
+limiting, id generation, and timestamp generation have already happened.
+
+```ts
+import type { AuditEvent, Transport } from '@tnet06/mapa-audit-types';
+
+class MyTransport implements Transport {
+  send(event: AuditEvent): void | Promise<void> {
+    // Deliver the event.
+    void event;
+  }
+
+  async close(): Promise<void> {
+    // Drain resources when needed.
+  }
+}
+```
+
+`send()` can be synchronous or asynchronous. `close()` is optional and exists for
+transports with resources to drain before shutdown. Errors from `send()` are
+contained by `record()` and reported as warnings, so they do not break business
+logic. Errors from `close()` can make `shutdown()` reject.
+
 ### ConsoleTransport
 
 ```ts
@@ -508,16 +684,32 @@ Formats:
 
 | Format  | Output                                                                                                      |
 | ------- | ----------------------------------------------------------------------------------------------------------- |
-| `jsonl` | One nested JSON event per line                                                                              |
+| `jsonl` | Default. One nested JSON event per line                                                                     |
 | `csv`   | Fixed canonical columns; nested known groups flattened; missing fields are empty cells                      |
 | `text`  | Human-readable line with `occurredAt`, `eventType`, `severity`, `eventName`, `correlationId`, and `outcome` |
 
-`FileTransport` serializes writes per instance and implements `close()` so
-`shutdown()`/`shutdownGlobalAudit()` can drain pending writes.
+An invalid `format` value from JavaScript throws synchronously in the
+constructor:
+
+```text
+[mapa-audit] invalid FileTransport format; expected one of: jsonl, csv, text
+```
+
+Omitting `format`, or passing `format: undefined` from JavaScript, selects
+`jsonl`. `FileTransport` serializes writes per instance and implements `close()`
+so `shutdown()`/`shutdownGlobalAudit()` can drain pending writes.
 
 CSV header coordination is safe within one `FileTransport` instance/process.
 Multiple instances or processes writing to the same CSV file can still race. If
 multiple parts of an app need the same file, share one `FileTransport` instance.
+
+CSV output also neutralizes spreadsheet formula prefixes at the output boundary.
+Any cell whose first character is `=`, `+`, `-`, `@`, tab, carriage return, or
+line feed gets an ASCII apostrophe (`'`) prepended before normal CSV escaping.
+Structural CSV escaping still runs afterward, duplicating quotes and quoting
+cells that contain comma, quote, CR, or LF. This documents the exact mitigation
+implemented by the transport; it is not a universal guarantee about every
+spreadsheet program.
 
 ### Fan-Out to Multiple Transports
 
@@ -552,21 +744,32 @@ that transport and continues dispatching to the others.
 The package is private in this monorepo today. Once published to a public or
 private registry, application projects can add it separately from the base SDK.
 
+```sh
+npm install @tnet06/mapa-audit-transport-rabbitmq
+```
+
 ```ts
 import { initGlobalAudit } from '@tnet06/mapa-audit-sdk';
 import { RabbitMQTransport } from '@tnet06/mapa-audit-transport-rabbitmq';
+
+const connection = process.env.AUDIT_RABBITMQ_URL;
+
+if (connection === undefined) {
+  throw new Error('AUDIT_RABBITMQ_URL is required');
+}
 
 initGlobalAudit({
   serviceName: 'orders-api',
   environment: 'production',
   transports: [
     new RabbitMQTransport({
-      connection: 'amqp://user:pass@rabbitmq:5672/audit',
+      connection,
       exchange: 'audit.events',
       connectionOptions: {
         heartbeatIntervalInSeconds: 5,
         reconnectTimeInSeconds: 5
-      }
+      },
+      publishTimeoutMs: 5_000
     })
   ]
 });
@@ -574,14 +777,37 @@ initGlobalAudit({
 
 Behavior:
 
-| Option              | Default          | Meaning                                                   |
-| ------------------- | ---------------- | --------------------------------------------------------- |
-| `connection`        | required         | AMQP URL or URL array passed to `amqp-connection-manager` |
-| `exchange`          | `'audit.events'` | Topic exchange that receives audit events                 |
-| `connectionOptions` | none             | Passed directly to `amqp-connection-manager.connect()`    |
+| Option              | Default          | Behavior                                                                |
+| ------------------- | ---------------- | ----------------------------------------------------------------------- |
+| `connection`        | required         | AMQP URL or URL array passed to `amqp-connection-manager`               |
+| `exchange`          | `'audit.events'` | Durable topic exchange that receives audit events                       |
+| `connectionOptions` | none             | Passed directly to `amqp-connection-manager.connect()`                  |
+| `publishTimeoutMs`  | `5000`           | Maximum wait for one publish before warning and returning from `send()` |
 
 The message body is `JSON.stringify(event)` with camelCase keys intact. Only the
 routing key is converted to snake_case from `event.eventType`.
+
+Operational behavior:
+
+- `connectFailed` emits an early
+  `[mapa-audit-transport-rabbitmq] rabbitmq connection failed: ...` warning.
+- `disconnect` emits
+  `[mapa-audit-transport-rabbitmq] rabbitmq disconnected: ...`.
+- A publish that exceeds `publishTimeoutMs` emits
+  `rabbitmq transport publish timed out after <ms>ms` and `send()` returns
+  without throwing into the host app. The timeout uses timers and does not block
+  the event loop.
+- Connection warnings may repeat according to `amqp-connection-manager`'s own
+  reconnection policy. Each publish timeout can also produce its own warning.
+- `close()` removes connection listeners, then closes the channel and connection.
+
+Connection warning URL details are sanitized. String AMQP/AMQPS URLs keep only
+scheme, host, port, and vhost; username, password, query string, and hash are
+removed. Objects with a `url` property are sanitized through that URL. Amqplib
+connection option objects are rendered from safe `protocol`, `hostname`, `port`,
+and `vhost` fields without exposing `username` or `password`. Malformed or
+unsupported URL values fail closed as `[invalid connection URL redacted]`. The
+original connection value passed to the broker client is not mutated.
 
 This transport only publishes. It does not consume queues and it does not include
 the Worker, retry/DLQ handling, TimescaleDB persistence, or database schema.
@@ -646,12 +872,16 @@ Dot notation supports arbitrary object nesting. Array indexing is not supported
 in this version; paths such as `items.0.card.cvv` should not be relied on for
 redaction.
 
-The original payload object passed by the caller is not mutated.
+Masking runs before payload size measurement. When masking is configured, the
+SDK deep-clones before replacing values, so the original payload object passed by
+the caller is not mutated.
 
 ### maxPayloadSize
 
 `maxPayloadSize` limits the serialized payload size in bytes. The default is
-`1_000_000` bytes.
+`1_000_000` bytes. The limit is inclusive: a prepared payload whose serialized
+JSON UTF-8 representation is exactly `1_000_000` bytes is preserved; only
+payloads larger than that are replaced.
 
 ```ts
 initGlobalAudit({
@@ -672,6 +902,12 @@ If the prepared payload exceeds the limit, the event payload is replaced with:
 ```
 
 Masking runs before size measurement.
+
+If payload preparation fails, `record()` still does not throw into the host
+application. A circular or otherwise non-serializable payload is discarded with a
+`[mapa-audit] failed to build audit event: ...` warning. If masking is
+configured and `structuredClone()` cannot clone the payload, the event is also
+discarded with the same contained-warning behavior.
 
 ## Lifecycle and Graceful Shutdown
 
@@ -706,12 +942,26 @@ process.on('SIGTERM', () => {
 
 ## Errors and Warnings
 
-The SDK is fire-and-forget from the host application's perspective:
+The SDK separates startup/configuration errors from operational event dispatch.
+Configuration problems fail fast. `record()` remains fire-and-forget and does
+not throw into business logic.
 
-- `record()` does not throw transport errors into business logic.
-- A failing transport does not prevent other transports from receiving the event.
-- Calling global `record()` before `initGlobalAudit()` discards the event and
-  emits one warning for the process.
+| Situation                                           | Behavior                                                                                         |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Empty or invalid `serviceName`                      | Throws synchronously during `createAudit()` / `initGlobalAudit()` with `[mapa-audit]`            |
+| Invalid `environment`                               | Throws synchronously during `createAudit()` / `initGlobalAudit()` with `[mapa-audit]`            |
+| Invalid `FileTransport.format`                      | Throws synchronously in the `FileTransport` constructor with `[mapa-audit]`                      |
+| Invalid `record()` input enum/name                  | Emits `[mapa-audit] failed to build audit event: ...`, discards the event, does not throw        |
+| Circular, non-serializable, or non-clonable payload | Emits `[mapa-audit] failed to build audit event: ...`, discards the event, does not throw        |
+| Global `record()` before `initGlobalAudit()`        | Emits one warning per process, discards events, does not throw                                   |
+| Sync or async `Transport.send()` failure            | Emits `[mapa-audit] transport send failed: ...`; other transports still receive the event        |
+| RabbitMQ connect/disconnect/publish timeout         | Emits `[mapa-audit-transport-rabbitmq] ...`; `send()` returns without throwing into the host app |
+| `Transport.close()` failure during shutdown         | `shutdown()` / `shutdownGlobalAudit()` can reject                                                |
+| `record()` after an instance shutdown has started   | No-op                                                                                            |
+
+This is not a promise that every possible adapter option is runtime-validated.
+The current runtime validation covers the fields listed above and the canonical
+record classification fields.
 
 Warnings use `process.emitWarning`. To route them into your own logging system:
 
@@ -765,6 +1015,34 @@ avoid flooding stderr.
 
 Share one `FileTransport` instance for a given CSV file path. Header coordination
 is safe within one instance/process, not across multiple instances or processes.
+
+### My CSV shows an apostrophe before a formula-like value
+
+That is expected. `FileTransport` neutralizes cells that start with spreadsheet
+formula prefixes by prepending `'` before normal CSV escaping. The apostrophe is
+part of the CSV value so spreadsheet software treats the cell as text.
+
+### RabbitMQ is not delivering events
+
+Check process warnings. `RabbitMQTransport` emits warnings for connection
+failures and disconnects with the `[mapa-audit-transport-rabbitmq]` prefix. URL
+details in those warnings are sanitized, so credentials are not printed. Also
+confirm that the broker is reachable and that consumers bind queues with routing
+keys that match the event type. The transport declares the configured exchange
+as a durable topic exchange when its channel is set up.
+
+### RabbitMQ publishes are timing out
+
+Each publish waits up to `publishTimeoutMs` milliseconds, default `5000`. If the
+broker client does not confirm the publish before that limit, `send()` returns
+and emits a timeout warning. Increase `publishTimeoutMs` only if the broker is
+healthy but slower than the default under expected load.
+
+### I called shutdown but getGlobalAudit still returns configured
+
+`shutdownGlobalAudit()` drains transports; it does not clear the singleton. Use
+`resetGlobalAudit()` only in tests or controlled reinitialization flows when you
+explicitly want to remove the global instance.
 
 ## Executable Examples
 
