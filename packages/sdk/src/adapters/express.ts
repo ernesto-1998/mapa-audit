@@ -1,6 +1,10 @@
 import type { NextFunction, Request, RequestHandler } from 'express';
-import { contextStore } from '../core/storage.js';
-import { buildHttpRequestContext, type ExtractActor } from './http-context.js';
+import { contextStore, type RequestContext } from '../core/storage.js';
+import {
+  buildHttpRequestContext,
+  nonEmptyString,
+  type ExtractActor
+} from './http-context.js';
 
 /** Options for the Express request context adapter. */
 export interface ExpressAdapterOptions {
@@ -60,10 +64,35 @@ export function expressAdapter(
       readHeader: (name) => request.get(name),
       httpMethod: request.method,
       endpoint: request.originalUrl,
-      routePattern: request.route?.path,
       ...(request.ip === undefined ? {} : { ipAddress: request.ip })
     });
 
+    defineDeferredRoutePattern(context, request);
+
     contextStore.run(context, () => next());
   };
+}
+
+function defineDeferredRoutePattern(
+  context: RequestContext,
+  request: RequestWithOptionalUser
+): void {
+  const baseRequest = context.request;
+
+  if (baseRequest === undefined) {
+    return;
+  }
+
+  Object.defineProperty(context, 'request', {
+    configurable: true,
+    enumerable: true,
+    get(): NonNullable<RequestContext['request']> {
+      const routePattern = nonEmptyString(request.route?.path);
+
+      return {
+        ...baseRequest,
+        ...(routePattern === undefined ? {} : { routePattern })
+      };
+    }
+  });
 }

@@ -1,4 +1,5 @@
-import type { Request, Response } from 'express';
+import express, { type Request, type Response } from 'express';
+import request from 'supertest';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AuditEvent } from '@tnet06/mapa-audit-types';
 import { expressAdapter } from '../../src/adapters/express.js';
@@ -274,6 +275,159 @@ describe('expressAdapter', () => {
         userId: 'user-1',
         userRole: 'editor'
       }
+    });
+  });
+
+  it('captures routePattern when registered globally in a real Express app', async () => {
+    const { events, transport } = createCapturingTransport();
+    const app = express();
+
+    initGlobalAudit({
+      serviceName: 'express-real-app',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    app.use(expressAdapter());
+    app.get('/users/:id', (_req, res) => {
+      record({
+        eventType: 'business',
+        eventName: 'user.viewed'
+      });
+
+      res.sendStatus(200);
+    });
+
+    await request(app).get('/users/user-1').expect(200);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.request).toMatchObject({
+      httpMethod: 'GET',
+      endpoint: '/users/user-1',
+      routePattern: '/users/:id'
+    });
+  });
+
+  it('snapshots routePattern only when route matching has happened', async () => {
+    const { events, transport } = createCapturingTransport();
+    const app = express();
+
+    initGlobalAudit({
+      serviceName: 'express-real-app',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    app.use(expressAdapter());
+    app.use((_req, _res, next) => {
+      record({
+        eventType: 'system',
+        eventName: 'before.route'
+      });
+      next();
+    });
+    app.get('/users/:id', (_req, res) => {
+      record({
+        eventType: 'business',
+        eventName: 'after.route'
+      });
+
+      res.sendStatus(200);
+    });
+
+    await request(app).get('/users/user-1').expect(200);
+
+    expect(events).toHaveLength(2);
+
+    const beforeRequest = events[0]?.request;
+    const afterRequest = events[1]?.request;
+
+    expect(beforeRequest).toMatchObject({
+      httpMethod: 'GET',
+      endpoint: '/users/user-1'
+    });
+    expect(Object.hasOwn(beforeRequest ?? {}, 'routePattern')).toBe(false);
+    expect(afterRequest).toMatchObject({
+      httpMethod: 'GET',
+      endpoint: '/users/user-1',
+      routePattern: '/users/:id'
+    });
+    expect(
+      Object.getOwnPropertyDescriptor(afterRequest ?? {}, 'routePattern')?.get
+    ).toBeUndefined();
+  });
+
+  it('captures literal route patterns in real Express handlers', async () => {
+    const { events, transport } = createCapturingTransport();
+    const app = express();
+
+    initGlobalAudit({
+      serviceName: 'express-real-app',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    app.use(expressAdapter());
+    app.get('/health', (_req, res) => {
+      record({
+        eventType: 'system',
+        eventName: 'health.checked'
+      });
+
+      res.sendStatus(200);
+    });
+
+    await request(app).get('/health').expect(200);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.request?.routePattern).toBe('/health');
+  });
+
+  it('keeps deferred routePattern isolated across concurrent real Express requests', async () => {
+    const { events, transport } = createCapturingTransport();
+    const app = express();
+
+    initGlobalAudit({
+      serviceName: 'express-real-app',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    app.use(expressAdapter());
+    app.get('/users/:id', (_req, res) => {
+      record({
+        eventType: 'business',
+        eventName: 'user.viewed'
+      });
+
+      res.sendStatus(200);
+    });
+    app.get('/orders/:id', (_req, res) => {
+      record({
+        eventType: 'business',
+        eventName: 'order.viewed'
+      });
+
+      res.sendStatus(200);
+    });
+
+    await Promise.all([
+      request(app).get('/users/user-1').expect(200),
+      request(app).get('/orders/order-1').expect(200)
+    ]);
+
+    expect(events).toHaveLength(2);
+    expect(
+      events.find((event) => event.eventName === 'user.viewed')?.request
+    ).toMatchObject({
+      endpoint: '/users/user-1',
+      routePattern: '/users/:id'
+    });
+    expect(
+      events.find((event) => event.eventName === 'order.viewed')?.request
+    ).toMatchObject({
+      endpoint: '/orders/order-1',
+      routePattern: '/orders/:id'
     });
   });
 });
