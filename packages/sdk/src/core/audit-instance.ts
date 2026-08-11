@@ -11,6 +11,7 @@ import {
   type RecordInput
 } from './record.js';
 import type { Transport } from './transport.js';
+import { emitAuditWarning, errorMessage } from './warnings.js';
 
 /**
  * Configuration for an audit SDK instance.
@@ -126,7 +127,14 @@ export function createAudit(config: AuditConfig): AuditInstance {
         return;
       }
 
-      const event = buildAuditEvent(input, service, payloadOptions);
+      let event: AuditEvent;
+
+      try {
+        event = buildAuditEvent(input, service, payloadOptions);
+      } catch (error: unknown) {
+        emitBuildWarning(error);
+        return;
+      }
 
       for (const transport of transports) {
         sendFireAndForget(transport, event);
@@ -160,4 +168,8 @@ export function createAudit(config: AuditConfig): AuditInstance {
 
 export function isEnvironment(value: string): value is Environment {
   return environments.includes(value as Environment);
+}
+
+function emitBuildWarning(error: unknown): void {
+  emitAuditWarning(`failed to build audit event: ${errorMessage(error)}`);
 }

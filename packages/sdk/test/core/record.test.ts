@@ -23,6 +23,7 @@ const syncTransportWarning =
   '[mapa-audit] transport send failed: transport failed';
 const asyncTransportWarning =
   '[mapa-audit] transport send failed: transport rejected';
+const failedBuildWarningPrefix = '[mapa-audit] failed to build audit event:';
 const tempDirs: string[] = [];
 
 function createCapturingTransport(): {
@@ -487,6 +488,128 @@ describe('record', () => {
     });
 
     expect(events[0]?.payload).toEqual(payload);
+  });
+
+  it('does not throw or dispatch from an audit instance when payload has a circular reference', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const { events, transport } = createCapturingTransport();
+    const payload: Record<string, unknown> = {
+      name: 'circular-payload'
+    };
+    payload.self = payload;
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    expect(() => {
+      audit.record({
+        eventType: 'business',
+        eventName: 'payload.circular',
+        payload
+      });
+    }).not.toThrow();
+
+    expect(events).toHaveLength(0);
+    expect(emitWarning).toHaveBeenCalledWith(
+      expect.stringContaining(failedBuildWarningPrefix)
+    );
+  });
+
+  it('does not throw or dispatch globally when payload has a circular reference', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const { events, transport } = createCapturingTransport();
+    const payload: Record<string, unknown> = {
+      name: 'circular-payload'
+    };
+    payload.self = payload;
+
+    initGlobalAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    expect(() => {
+      record({
+        eventType: 'business',
+        eventName: 'payload.circular',
+        payload
+      });
+    }).not.toThrow();
+
+    expect(events).toHaveLength(0);
+    expect(emitWarning).toHaveBeenCalledWith(
+      expect.stringContaining(failedBuildWarningPrefix)
+    );
+  });
+
+  it('does not throw or dispatch from an audit instance when masked payload cannot be cloned', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const { events, transport } = createCapturingTransport();
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport],
+      maskedFields: ['creditCard']
+    });
+
+    expect(() => {
+      audit.record({
+        eventType: 'business',
+        eventName: 'payload.uncloneable',
+        payload: {
+          creditCard: '4111111111111111',
+          callback() {
+            return undefined;
+          }
+        }
+      });
+    }).not.toThrow();
+
+    expect(events).toHaveLength(0);
+    expect(emitWarning).toHaveBeenCalledWith(
+      expect.stringContaining(failedBuildWarningPrefix)
+    );
+  });
+
+  it('does not throw or dispatch globally when masked payload cannot be cloned', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const { events, transport } = createCapturingTransport();
+
+    initGlobalAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport],
+      maskedFields: ['creditCard']
+    });
+
+    expect(() => {
+      record({
+        eventType: 'business',
+        eventName: 'payload.uncloneable',
+        payload: {
+          creditCard: '4111111111111111',
+          callback() {
+            return undefined;
+          }
+        }
+      });
+    }).not.toThrow();
+
+    expect(events).toHaveLength(0);
+    expect(emitWarning).toHaveBeenCalledWith(
+      expect.stringContaining(failedBuildWarningPrefix)
+    );
   });
 
   it('uses the default console transport when no transports are configured', () => {
