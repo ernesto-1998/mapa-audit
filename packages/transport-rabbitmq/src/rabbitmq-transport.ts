@@ -3,17 +3,19 @@ import {
   type AmqpConnectionManager,
   type AmqpConnectionManagerOptions,
   type Channel,
-  type ChannelWrapper
+  type ChannelWrapper,
+  type ConnectionUrl
 } from 'amqp-connection-manager';
 import type { AuditEvent, Transport } from '@tnet06/mapa-audit-types';
 import { emitAuditWarning, errorMessage } from './warnings.js';
 
 const defaultExchange = 'audit.events';
 const defaultPublishTimeoutMs = 5_000;
+const invalidConnectionUrlPlaceholder = '[invalid connection URL redacted]';
 
 interface ConnectionFailedEvent {
   err?: unknown;
-  url?: unknown;
+  url?: ConnectionUrl;
 }
 
 interface DisconnectEvent {
@@ -177,7 +179,118 @@ function connectionEventMessage(event: ConnectionFailedEvent): string {
     return message;
   }
 
-  return `${message} (url: ${String(event.url)})`;
+  return `${message} (url: ${sanitizeConnectionUrl(event.url)})`;
+}
+
+function sanitizeConnectionUrl(value: ConnectionUrl): string {
+  if (typeof value === 'string') {
+    return sanitizeConnectionUrlString(value);
+  }
+
+  if (isObjectWithUrl(value)) {
+    return sanitizeConnectionUrlString(value.url);
+  }
+
+  if (isRecord(value)) {
+    return sanitizeConnectionOptions(value);
+  }
+
+  return invalidConnectionUrlPlaceholder;
+}
+
+function sanitizeConnectionUrlString(value: string): string {
+  try {
+    const url = new URL(value);
+
+    if (url.protocol !== 'amqp:' && url.protocol !== 'amqps:') {
+      return invalidConnectionUrlPlaceholder;
+    }
+
+    if (!isSafeHost(url.hostname)) {
+      return invalidConnectionUrlPlaceholder;
+    }
+
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+
+    return `${url.protocol}//${url.host}${url.pathname === '/' ? '' : url.pathname}`;
+  } catch {
+    return invalidConnectionUrlPlaceholder;
+  }
+}
+
+function sanitizeConnectionOptions(value: Record<string, unknown>): string {
+  const hostname = nonEmptyString(value.hostname);
+
+  if (hostname === undefined || !isSafeHost(hostname)) {
+    return invalidConnectionUrlPlaceholder;
+  }
+
+  const protocol = normalizeProtocol(nonEmptyString(value.protocol) ?? 'amqp');
+
+  if (protocol === undefined) {
+    return invalidConnectionUrlPlaceholder;
+  }
+
+  try {
+    const url = new URL(`${protocol}://${hostname}`);
+    const port = portNumber(value.port);
+
+    if (port !== undefined) {
+      url.port = String(port);
+    }
+
+    const vhost = nonEmptyString(value.vhost);
+
+    if (vhost !== undefined) {
+      url.pathname = vhost.startsWith('/') ? vhost : `/${vhost}`;
+    }
+
+    return `${url.protocol}//${url.host}${url.pathname === '/' ? '' : url.pathname}`;
+  } catch {
+    return invalidConnectionUrlPlaceholder;
+  }
+}
+
+function normalizeProtocol(value: string): 'amqp' | 'amqps' | undefined {
+  const protocol = value.endsWith(':') ? value.slice(0, -1) : value;
+
+  if (protocol === 'amqp' || protocol === 'amqps') {
+    return protocol;
+  }
+
+  return undefined;
+}
+
+function portNumber(value: unknown): number | undefined {
+  if (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= 65_535
+  ) {
+    return value;
+  }
+
+  return undefined;
+}
+
+function isSafeHost(value: string): boolean {
+  return value.length > 0 && !value.includes('%');
+}
+
+function isObjectWithUrl(value: object): value is { url: string } {
+  return 'url' in value && typeof value.url === 'string';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object';
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 async function withPublishTimeout(

@@ -208,6 +208,176 @@ describe('RabbitMQTransport', () => {
     );
   });
 
+  it('redacts username and password from connectFailed URL warnings', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+
+    new RabbitMQTransport({ connection: 'amqp://localhost' });
+    amqpMocks.connection.emit('connectFailed', {
+      err: new Error('connect ECONNREFUSED'),
+      url: 'amqp://test-user:test-secret@rabbitmq:5672/audit'
+    });
+
+    const warning = emittedWarning(emitWarning);
+
+    expect(warning).toContain(
+      '[mapa-audit-transport-rabbitmq] rabbitmq connection failed: connect ECONNREFUSED'
+    );
+    expect(warning).toContain('(url: amqp://rabbitmq:5672/audit)');
+    expect(warning).not.toContain('test-user');
+    expect(warning).not.toContain('test-secret');
+    expect(warning).not.toContain('test-user:test-secret@');
+  });
+
+  it('redacts percent-encoded credentials from connectFailed URL warnings', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+
+    new RabbitMQTransport({ connection: 'amqp://localhost' });
+    amqpMocks.connection.emit('connectFailed', {
+      err: new Error('connect ECONNREFUSED'),
+      url: 'amqp://test%2Duser:test%2Dsecret@rabbitmq:5672/audit'
+    });
+
+    const warning = emittedWarning(emitWarning);
+
+    expect(warning).toContain('(url: amqp://rabbitmq:5672/audit)');
+    expect(warning).not.toContain('test%2Duser');
+    expect(warning).not.toContain('test%2Dsecret');
+    expect(warning).not.toContain('test-user');
+    expect(warning).not.toContain('test-secret');
+  });
+
+  it('keeps a useful connectFailed URL when it has no credentials', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+
+    new RabbitMQTransport({ connection: 'amqp://localhost' });
+    amqpMocks.connection.emit('connectFailed', {
+      err: new Error('connect ECONNREFUSED'),
+      url: 'amqps://rabbitmq:5671/audit'
+    });
+
+    const warning = emittedWarning(emitWarning);
+
+    expect(warning).toContain('(url: amqps://rabbitmq:5671/audit)');
+    expect(warning).not.toContain('[invalid connection URL redacted]');
+  });
+
+  it('omits the URL section when connectFailed has no URL', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+
+    new RabbitMQTransport({ connection: 'amqp://localhost' });
+    amqpMocks.connection.emit('connectFailed', {
+      err: new Error('connect ECONNREFUSED')
+    });
+
+    const warning = emittedWarning(emitWarning);
+
+    expect(warning).toBe(
+      '[mapa-audit-transport-rabbitmq] rabbitmq connection failed: connect ECONNREFUSED'
+    );
+    expect(warning).not.toContain('(url:');
+  });
+
+  it('fails closed for malformed connectFailed URL values', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+
+    new RabbitMQTransport({ connection: 'amqp://localhost' });
+    amqpMocks.connection.emit('connectFailed', {
+      err: new Error('connect ECONNREFUSED'),
+      url: 'amqp://test-user:test-secret@%'
+    });
+
+    const warning = emittedWarning(emitWarning);
+
+    expect(warning).toContain('(url: [invalid connection URL redacted])');
+    expect(warning).not.toContain('test-user');
+    expect(warning).not.toContain('test-secret');
+    expect(warning).not.toContain('amqp://test-user:test-secret@%');
+  });
+
+  it('fails closed for unsupported connectFailed URL object shapes', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+
+    new RabbitMQTransport({ connection: 'amqp://localhost' });
+    amqpMocks.connection.emit('connectFailed', {
+      err: new Error('connect ECONNREFUSED'),
+      url: {
+        password: 'test-secret'
+      }
+    });
+
+    const warning = emittedWarning(emitWarning);
+
+    expect(warning).toContain('(url: [invalid connection URL redacted])');
+    expect(warning).not.toContain('test-secret');
+  });
+
+  it('redacts credentials from connectFailed objects with a url property', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const connectionUrl = {
+      url: 'amqp://test-user:test-secret@rabbitmq:5672/audit',
+      connectionOptions: {
+        timeout: 100
+      }
+    };
+
+    new RabbitMQTransport({ connection: 'amqp://localhost' });
+    amqpMocks.connection.emit('connectFailed', {
+      err: new Error('connect ECONNREFUSED'),
+      url: connectionUrl
+    });
+
+    const warning = emittedWarning(emitWarning);
+
+    expect(connectionUrl.url).toBe(
+      'amqp://test-user:test-secret@rabbitmq:5672/audit'
+    );
+    expect(warning).toContain('(url: amqp://rabbitmq:5672/audit)');
+    expect(warning).not.toContain('test-user');
+    expect(warning).not.toContain('test-secret');
+  });
+
+  it('redacts credentials from amqplib connection option objects', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const connectionOptions = {
+      protocol: 'amqp',
+      hostname: 'rabbitmq',
+      port: 5672,
+      username: 'test-user',
+      password: 'test-secret',
+      vhost: 'audit'
+    };
+
+    new RabbitMQTransport({ connection: 'amqp://localhost' });
+    amqpMocks.connection.emit('connectFailed', {
+      err: new Error('connect ECONNREFUSED'),
+      url: connectionOptions
+    });
+
+    const warning = emittedWarning(emitWarning);
+
+    expect(connectionOptions.username).toBe('test-user');
+    expect(connectionOptions.password).toBe('test-secret');
+    expect(warning).toContain('(url: amqp://rabbitmq:5672/audit)');
+    expect(warning).not.toContain('test-user');
+    expect(warning).not.toContain('test-secret');
+  });
+
   it('emits a warning when RabbitMQ disconnects', () => {
     const emitWarning = vi
       .spyOn(process, 'emitWarning')
@@ -287,6 +457,12 @@ describe('RabbitMQTransport', () => {
 
 async function waitForSetup(): Promise<void> {
   await Promise.all(amqpMocks.setupResults);
+}
+
+function emittedWarning(
+  emitWarning: ReturnType<typeof vi.spyOn<typeof process, 'emitWarning'>>
+): string {
+  return String(emitWarning.mock.calls[0]?.[0]);
 }
 
 const auditEvent: AuditEvent = {
