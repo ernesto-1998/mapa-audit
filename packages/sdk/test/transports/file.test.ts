@@ -164,6 +164,101 @@ describe('FileTransport', () => {
     expect(cell(header, row, 'payload')).toBe('');
   });
 
+  it('neutralizes formula injection in CSV cells', async () => {
+    const filePath = await createTempFilePath('formula.csv');
+    const transport = new FileTransport({ path: filePath, format: 'csv' });
+    const event: AuditEvent = {
+      ...fullEvent,
+      correlationId: '=1+1'
+    };
+
+    await transport.send(event);
+
+    const content = await readFile(filePath, 'utf8');
+    const [header, row] = parseCsv(content);
+
+    expect(cell(header, row, 'correlationId')).toBe("'=1+1");
+    expect(content).not.toContain(',=1+1,');
+    expect(row).toHaveLength(AUDIT_EVENT_CSV_COLUMNS.length);
+  });
+
+  it.each([
+    '=1+1',
+    '+SUM(1,1)',
+    '-1+2',
+    '@SUM(1,1)',
+    '\t=1+1',
+    '\r=1+1',
+    '\n=1+1'
+  ])(
+    'neutralizes CSV formula prefix for values starting with %j',
+    async (dangerousValue) => {
+      const filePath = await createTempFilePath('formula-prefix.csv');
+      const transport = new FileTransport({ path: filePath, format: 'csv' });
+      const event: AuditEvent = {
+        ...fullEvent,
+        correlationId: dangerousValue
+      };
+
+      await transport.send(event);
+
+      const [header, row] = parseCsv(await readFile(filePath, 'utf8'));
+
+      expect(cell(header, row, 'correlationId')).toBe(`'${dangerousValue}`);
+      expect(cell(header, row, 'correlationId')?.startsWith("'")).toBe(true);
+      expect(row).toHaveLength(AUDIT_EVENT_CSV_COLUMNS.length);
+    }
+  );
+
+  it('neutralizes formulas while preserving structural CSV escaping', async () => {
+    const filePath = await createTempFilePath('formula-escaped.csv');
+    const transport = new FileTransport({ path: filePath, format: 'csv' });
+    const event: AuditEvent = {
+      ...fullEvent,
+      eventName: '=HYPERLINK("https://example.invalid","open")'
+    };
+
+    await transport.send(event);
+
+    const content = await readFile(filePath, 'utf8');
+    const [header, row] = parseCsv(content);
+
+    expect(content).toContain(
+      '"\'=HYPERLINK(""https://example.invalid"",""open"")"'
+    );
+    expect(cell(header, row, 'eventName')).toBe(
+      '\'=HYPERLINK("https://example.invalid","open")'
+    );
+    expect(row).toHaveLength(AUDIT_EVENT_CSV_COLUMNS.length);
+  });
+
+  it('keeps safe CSV values unchanged while preserving structural escaping', async () => {
+    const filePath = await createTempFilePath('safe-values.csv');
+    const transport = new FileTransport({ path: filePath, format: 'csv' });
+    const event: AuditEvent = {
+      ...fullEvent,
+      correlationId: 'order-1',
+      eventName: 'user@example.com',
+      actor: {
+        ...fullEvent.actor,
+        userId: 'value+suffix',
+        userRole: 'normal, "quoted" role'
+      }
+    };
+
+    await transport.send(event);
+
+    const content = await readFile(filePath, 'utf8');
+    const [header, row] = parseCsv(content);
+
+    expect(cell(header, row, 'correlationId')).toBe('order-1');
+    expect(cell(header, row, 'eventName')).toBe('user@example.com');
+    expect(cell(header, row, 'actor_userId')).toBe('value+suffix');
+    expect(cell(header, row, 'actor_userRole')).toBe('normal, "quoted" role');
+    expect(content).toContain('"normal, ""quoted"" role"');
+    expect(row).toHaveLength(AUDIT_EVENT_CSV_COLUMNS.length);
+  });
+
   it('escapes CSV values containing commas, quotes, or newlines', async () => {
     const filePath = await createTempFilePath('escaped.csv');
     const transport = new FileTransport({ path: filePath, format: 'csv' });

@@ -122,8 +122,18 @@ function escapeCsvCell(value: string | undefined): string {
     return '';
   }
 
-  if (/[",\n\r]/u.test(value)) {
-    return `"${value.replaceAll('"', '""')}"`;
+  const neutralizedValue = neutralizeSpreadsheetFormula(value);
+
+  if (/[",\n\r]/u.test(neutralizedValue)) {
+    return `"${neutralizedValue.replaceAll('"', '""')}"`;
+  }
+
+  return neutralizedValue;
+}
+
+function neutralizeSpreadsheetFormula(value: string): string {
+  if (/^[=+\-@\t\r\n]/u.test(value)) {
+    return `'${value}`;
   }
 
   return value;
