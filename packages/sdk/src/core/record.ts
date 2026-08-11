@@ -1,8 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import type { AuditEvent } from '@tnet06/mapa-audit-types';
+import {
+  eventOutcomes,
+  eventSeverities,
+  eventTypes,
+  type AuditEvent
+} from '@tnet06/mapa-audit-types';
 import { recordGlobal } from './global-audit.js';
 import { getContext } from './storage.js';
 import type { Transport } from './transport.js';
+import { isNonBlankString, isStringMember } from './validation.js';
 import { emitAuditWarning, errorMessage } from './warnings.js';
 
 /** Input accepted by `record()` and `AuditInstance.record()`. */
@@ -48,6 +54,8 @@ export function buildAuditEvent(
   service: AuditEvent['service'],
   payloadOptions: PayloadOptions = {}
 ): AuditEvent {
+  validateRecordInput(input);
+
   const ctx = getContext();
   const payload = preparePayload(input.payload, payloadOptions);
 
@@ -89,6 +97,38 @@ export function sendFireAndForget(
 
 function emitTransportWarning(error: unknown): void {
   emitAuditWarning(`transport send failed: ${errorMessage(error)}`);
+}
+
+function validateRecordInput(input: unknown): asserts input is RecordInput {
+  if (!isRecord(input)) {
+    throw new Error('record input must be an object');
+  }
+
+  if (!isStringMember(input.eventType, eventTypes)) {
+    throw new Error('invalid eventType');
+  }
+
+  if (!isNonBlankString(input.eventName)) {
+    throw new Error('eventName must be a non-empty string');
+  }
+
+  if (
+    input.severity !== undefined &&
+    !isStringMember(input.severity, eventSeverities)
+  ) {
+    throw new Error('invalid severity');
+  }
+
+  if (
+    input.outcome !== undefined &&
+    !isStringMember(input.outcome, eventOutcomes)
+  ) {
+    throw new Error('invalid outcome');
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object';
 }
 
 function preparePayload(

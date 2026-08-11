@@ -2,15 +2,24 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AuditEvent, Environment } from '@tnet06/mapa-audit-types';
-import { createAudit } from '../../src/core/audit-instance.js';
+import {
+  eventOutcomes,
+  eventSeverities,
+  eventTypes,
+  type AuditEvent,
+  type Environment
+} from '@tnet06/mapa-audit-types';
+import {
+  createAudit,
+  type AuditConfig
+} from '../../src/core/audit-instance.js';
 import {
   getGlobalAudit,
   initGlobalAudit,
   resetGlobalAudit,
   shutdownGlobalAudit
 } from '../../src/core/global-audit.js';
-import { record } from '../../src/core/record.js';
+import { record, type RecordInput } from '../../src/core/record.js';
 import { contextStore, type RequestContext } from '../../src/core/storage.js';
 import type { Transport } from '../../src/core/transport.js';
 import { FileTransport } from '../../src/transports/file.js';
@@ -24,6 +33,7 @@ const syncTransportWarning =
 const asyncTransportWarning =
   '[mapa-audit] transport send failed: transport rejected';
 const failedBuildWarningPrefix = '[mapa-audit] failed to build audit event:';
+const serviceNameError = '[mapa-audit] serviceName must be a non-empty string';
 const tempDirs: string[] = [];
 
 function createCapturingTransport(): {
@@ -40,6 +50,39 @@ function createCapturingTransport(): {
       }
     }
   };
+}
+
+function createUnsafeAuditConfig(config: Record<string, unknown>): AuditConfig {
+  return config as unknown as AuditConfig;
+}
+
+function createUnsafeRecordInput(input: unknown): RecordInput {
+  return input as RecordInput;
+}
+
+function expectInvalidInstanceRecord(
+  input: unknown,
+  warningDetail: string
+): void {
+  const emitWarning = vi
+    .spyOn(process, 'emitWarning')
+    .mockImplementation(() => undefined);
+  const { events, transport } = createCapturingTransport();
+  const audit = createAudit({
+    serviceName: 'recipes-api',
+    environment: 'development',
+    transports: [transport]
+  });
+
+  expect(() => {
+    audit.record(createUnsafeRecordInput(input));
+  }).not.toThrow();
+
+  expect(events).toHaveLength(0);
+  expect(emitWarning).toHaveBeenCalledTimes(1);
+  expect(emitWarning).toHaveBeenCalledWith(
+    `${failedBuildWarningPrefix} ${warningDetail}`
+  );
 }
 
 describe('record', () => {
@@ -166,6 +209,230 @@ describe('record', () => {
       payload: {}
     });
     expect(events[0]?.correlationId).toBeUndefined();
+  });
+
+  it.each([
+    ['missing', { eventName: 'invalid.event' }],
+    ['null', { eventType: null, eventName: 'invalid.event' }],
+    [
+      'unknown string',
+      { eventType: 'not-a-real-type', eventName: 'invalid.event' }
+    ],
+    ['number', { eventType: 42, eventName: 'invalid.event' }]
+  ])(
+    'does not throw, warn once, or dispatch for invalid eventType: %s',
+    (_caseName, input) => {
+      expectInvalidInstanceRecord(input, 'invalid eventType');
+    }
+  );
+
+  it.each([
+    ['missing', { eventType: 'business' }],
+    ['null', { eventType: 'business', eventName: null }],
+    ['number', { eventType: 'business', eventName: 42 }],
+    ['empty string', { eventType: 'business', eventName: '' }],
+    ['whitespace', { eventType: 'business', eventName: '   ' }]
+  ])(
+    'does not throw, warn once, or dispatch for invalid eventName: %s',
+    (_caseName, input) => {
+      expectInvalidInstanceRecord(
+        input,
+        'eventName must be a non-empty string'
+      );
+    }
+  );
+
+  it.each([
+    [
+      'null',
+      { eventType: 'business', eventName: 'invalid.severity', severity: null }
+    ],
+    [
+      'unknown string',
+      {
+        eventType: 'business',
+        eventName: 'invalid.severity',
+        severity: 'fatal'
+      }
+    ],
+    [
+      'number',
+      { eventType: 'business', eventName: 'invalid.severity', severity: 42 }
+    ]
+  ])(
+    'does not throw, warn once, or dispatch for invalid severity: %s',
+    (_caseName, input) => {
+      expectInvalidInstanceRecord(input, 'invalid severity');
+    }
+  );
+
+  it.each([
+    [
+      'null',
+      { eventType: 'business', eventName: 'invalid.outcome', outcome: null }
+    ],
+    [
+      'unknown string',
+      { eventType: 'business', eventName: 'invalid.outcome', outcome: 'maybe' }
+    ],
+    [
+      'number',
+      { eventType: 'business', eventName: 'invalid.outcome', outcome: 42 }
+    ]
+  ])(
+    'does not throw, warn once, or dispatch for invalid outcome: %s',
+    (_caseName, input) => {
+      expectInvalidInstanceRecord(input, 'invalid outcome');
+    }
+  );
+
+  it('keeps undefined severity and outcome as optional values without warnings', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const { events, transport } = createCapturingTransport();
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    audit.record(
+      createUnsafeRecordInput({
+        eventType: 'business',
+        eventName: 'optional.values',
+        severity: undefined,
+        outcome: undefined
+      })
+    );
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.severity).toBe('info');
+    expect(Object.hasOwn(events[0] ?? {}, 'outcome')).toBe(false);
+    expect(emitWarning).not.toHaveBeenCalled();
+  });
+
+  it('accepts all canonical event types without warnings', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const { events, transport } = createCapturingTransport();
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    for (const eventType of eventTypes) {
+      audit.record({
+        eventType,
+        eventName: `event-type.${eventType}`
+      });
+    }
+
+    expect(events.map((event) => event.eventType)).toEqual([...eventTypes]);
+    expect(emitWarning).not.toHaveBeenCalled();
+  });
+
+  it('accepts all canonical event severities without warnings', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const { events, transport } = createCapturingTransport();
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    for (const severity of eventSeverities) {
+      audit.record({
+        eventType: 'business',
+        eventName: `severity.${severity}`,
+        severity
+      });
+    }
+
+    expect(events.map((event) => event.severity)).toEqual([...eventSeverities]);
+    expect(emitWarning).not.toHaveBeenCalled();
+  });
+
+  it('accepts all canonical outcomes without warnings', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const { events, transport } = createCapturingTransport();
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    for (const outcome of eventOutcomes) {
+      audit.record({
+        eventType: 'business',
+        eventName: `outcome.${outcome}`,
+        outcome
+      });
+    }
+
+    expect(events.map((event) => event.outcome)).toEqual([...eventOutcomes]);
+    expect(emitWarning).not.toHaveBeenCalled();
+  });
+
+  it('does not throw, warn once, or dispatch globally for invalid record input', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const { events, transport } = createCapturingTransport();
+
+    initGlobalAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    expect(() => {
+      record(
+        createUnsafeRecordInput({
+          eventType: 'not-a-real-type',
+          eventName: 'invalid.global'
+        })
+      );
+    }).not.toThrow();
+
+    expect(events).toHaveLength(0);
+    expect(emitWarning).toHaveBeenCalledTimes(1);
+    expect(emitWarning).toHaveBeenCalledWith(
+      `${failedBuildWarningPrefix} invalid eventType`
+    );
+  });
+
+  it('does not throw, warn once, dispatch, or leak input details for null record input', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const { events, transport } = createCapturingTransport();
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    expect(() => {
+      audit.record(createUnsafeRecordInput(null));
+    }).not.toThrow();
+
+    expect(events).toHaveLength(0);
+    expect(emitWarning).toHaveBeenCalledTimes(1);
+
+    const warning = emitWarning.mock.calls[0]?.[0];
+
+    expect(warning).toBe(
+      `${failedBuildWarningPrefix} record input must be an object`
+    );
+    expect(String(warning)).not.toContain('payload');
+    expect(String(warning)).not.toContain('{');
   });
 
   it('masks configured top-level payload fields without changing other fields', () => {
@@ -959,6 +1226,50 @@ describe('record', () => {
 });
 
 describe('initGlobalAudit', () => {
+  it.each([
+    ['undefined', undefined],
+    ['null', null],
+    ['number', 42],
+    ['empty string', ''],
+    ['whitespace', '   ']
+  ])(
+    'createAudit rejects invalid serviceName: %s',
+    (_caseName, serviceName) => {
+      expect(() => {
+        createAudit(
+          createUnsafeAuditConfig({
+            serviceName,
+            environment: 'development'
+          })
+        );
+      }).toThrow(serviceNameError);
+    }
+  );
+
+  it('initGlobalAudit rejects invalid serviceName', () => {
+    expect(() => {
+      initGlobalAudit(
+        createUnsafeAuditConfig({
+          serviceName: '   ',
+          environment: 'development'
+        })
+      );
+    }).toThrow(serviceNameError);
+  });
+
+  it('does not leave a global singleton configured after failed initialization', () => {
+    expect(() => {
+      initGlobalAudit(
+        createUnsafeAuditConfig({
+          serviceName: undefined,
+          environment: 'development'
+        })
+      );
+    }).toThrow(serviceNameError);
+
+    expect(getGlobalAudit()).toBeUndefined();
+  });
+
   it('rejects invalid environments', () => {
     expect(() => {
       initGlobalAudit({

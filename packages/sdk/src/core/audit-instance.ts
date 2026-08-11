@@ -11,6 +11,7 @@ import {
   type RecordInput
 } from './record.js';
 import type { Transport } from './transport.js';
+import { isNonBlankString, isStringMember } from './validation.js';
 import { emitAuditWarning, errorMessage } from './warnings.js';
 
 /**
@@ -96,6 +97,10 @@ export interface GlobalAuditInfo {
  * @returns An independent audit instance.
  */
 export function createAudit(config: AuditConfig): AuditInstance {
+  if (!isNonBlankString(config.serviceName)) {
+    throw new Error('[mapa-audit] serviceName must be a non-empty string');
+  }
+
   if (!isEnvironment(config.environment)) {
     throw new Error(
       `[mapa-audit] invalid environment "${String(config.environment)}"`
@@ -167,7 +172,7 @@ export function createAudit(config: AuditConfig): AuditInstance {
 }
 
 export function isEnvironment(value: string): value is Environment {
-  return environments.includes(value as Environment);
+  return isStringMember(value, environments);
 }
 
 function emitBuildWarning(error: unknown): void {
