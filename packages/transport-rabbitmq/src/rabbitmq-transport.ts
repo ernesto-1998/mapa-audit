@@ -9,6 +9,16 @@ import type { AuditEvent, Transport } from '@tnet06/mapa-audit-types';
 import { emitAuditWarning, errorMessage } from './warnings.js';
 
 const defaultExchange = 'audit.events';
+const defaultPublishTimeoutMs = 5_000;
+
+interface ConnectionFailedEvent {
+  err?: unknown;
+  url?: unknown;
+}
+
+interface DisconnectEvent {
+  err?: unknown;
+}
 
 /** Options for `RabbitMQTransport`. */
 export interface RabbitMQTransportOptions {
@@ -32,6 +42,13 @@ export interface RabbitMQTransportOptions {
    * to the broker client.
    */
   connectionOptions?: AmqpConnectionManagerOptions;
+  /**
+   * Maximum time to wait for one publish operation before reporting it as
+   * failed from this transport.
+   *
+   * @default 5000
+   */
+  publishTimeoutMs?: number;
 }
 
 /**
@@ -48,11 +65,22 @@ export class RabbitMQTransport implements Transport {
   readonly #exchange: string;
   readonly #connection: AmqpConnectionManager;
   readonly #channel: ChannelWrapper;
+  readonly #publishTimeoutMs: number;
+  readonly #onConnectFailed = (event: ConnectionFailedEvent): void => {
+    emitConnectionFailedWarning(event);
+  };
+  readonly #onDisconnect = (event: DisconnectEvent): void => {
+    emitDisconnectWarning(event);
+  };
 
   /** Creates a RabbitMQ transport and declares the configured topic exchange. */
   constructor(options: RabbitMQTransportOptions) {
     this.#exchange = options.exchange ?? defaultExchange;
+    this.#publishTimeoutMs =
+      options.publishTimeoutMs ?? defaultPublishTimeoutMs;
     this.#connection = connect(options.connection, options.connectionOptions);
+    this.#connection.on('connectFailed', this.#onConnectFailed);
+    this.#connection.on('disconnect', this.#onDisconnect);
     this.#channel = this.#connection.createChannel({
       name: 'mapa-audit-rabbitmq-transport',
       setup: async (channel: Channel) => {
@@ -71,12 +99,28 @@ export class RabbitMQTransport implements Transport {
    */
   async send(event: AuditEvent): Promise<void> {
     try {
-      await this.#channel.publish(
+      const publish = this.#channel.publish(
         this.#exchange,
         camelToSnakeCase(event.eventType),
-        Buffer.from(JSON.stringify(event), 'utf8')
+        Buffer.from(JSON.stringify(event), 'utf8'),
+        {
+          timeout: this.#publishTimeoutMs
+        }
       );
+      const publishResult = await withPublishTimeout(
+        publish,
+        this.#publishTimeoutMs
+      );
+
+      if (publishResult === 'timeout') {
+        emitPublishTimeoutWarning(this.#publishTimeoutMs);
+      }
     } catch (error: unknown) {
+      if (isPublishTimeoutError(error)) {
+        emitPublishTimeoutWarning(this.#publishTimeoutMs);
+        return;
+      }
+
       emitPublishWarning(error);
     }
   }
@@ -90,6 +134,8 @@ export class RabbitMQTransport implements Transport {
    * concern.
    */
   async close(): Promise<void> {
+    this.#connection.removeListener('connectFailed', this.#onConnectFailed);
+    this.#connection.removeListener('disconnect', this.#onDisconnect);
     await this.#channel.close();
     await this.#connection.close();
   }
@@ -104,4 +150,64 @@ function camelToSnakeCase(value: string): string {
 
 function emitPublishWarning(error: unknown): void {
   emitAuditWarning(`rabbitmq transport publish failed: ${errorMessage(error)}`);
+}
+
+function isPublishTimeoutError(error: unknown): boolean {
+  return error instanceof Error && error.message === 'timeout';
+}
+
+function emitPublishTimeoutWarning(timeoutMs: number): void {
+  emitAuditWarning(`rabbitmq transport publish timed out after ${timeoutMs}ms`);
+}
+
+function emitConnectionFailedWarning(event: ConnectionFailedEvent): void {
+  emitAuditWarning(
+    `rabbitmq connection failed: ${connectionEventMessage(event)}`
+  );
+}
+
+function emitDisconnectWarning(event: DisconnectEvent): void {
+  emitAuditWarning(`rabbitmq disconnected: ${errorMessage(event.err)}`);
+}
+
+function connectionEventMessage(event: ConnectionFailedEvent): string {
+  const message = errorMessage(event.err);
+
+  if (event.url === undefined) {
+    return message;
+  }
+
+  return `${message} (url: ${String(event.url)})`;
+}
+
+async function withPublishTimeout(
+  publish: Promise<unknown>,
+  timeoutMs: number
+): Promise<'published' | 'timeout'> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let didTimeout = false;
+  const guardedPublish = publish.catch((error: unknown) => {
+    if (didTimeout) {
+      return undefined;
+    }
+
+    throw error;
+  });
+  const timeoutPromise = new Promise<'timeout'>((resolve) => {
+    timeout = setTimeout(() => {
+      didTimeout = true;
+      resolve('timeout');
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([
+      guardedPublish.then(() => 'published' as const),
+      timeoutPromise
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
 }

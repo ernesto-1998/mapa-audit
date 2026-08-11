@@ -2,12 +2,39 @@ import type { AuditEvent } from '@tnet06/mapa-audit-types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const amqpMocks = vi.hoisted(() => {
+  type Listener = (event: unknown) => void;
+
   const setupResults: Array<Promise<unknown>> = [];
   const assertExchange = vi.fn().mockResolvedValue(undefined);
   const setupChannel = { assertExchange };
   const publish = vi.fn().mockResolvedValue(true);
   const channelClose = vi.fn().mockResolvedValue(undefined);
   const connectionClose = vi.fn().mockResolvedValue(undefined);
+  const listeners = new Map<string, Set<Listener>>();
+  const connection = {
+    on: vi.fn((event: string, listener: Listener) => {
+      const eventListeners = listeners.get(event) ?? new Set<Listener>();
+      eventListeners.add(listener);
+      listeners.set(event, eventListeners);
+
+      return connection;
+    }),
+    removeListener: vi.fn((event: string, listener: Listener) => {
+      listeners.get(event)?.delete(listener);
+
+      return connection;
+    }),
+    emit(event: string, payload: unknown) {
+      for (const listener of listeners.get(event) ?? []) {
+        listener(payload);
+      }
+    },
+    listenerCount(event: string) {
+      return listeners.get(event)?.size ?? 0;
+    },
+    createChannel: vi.fn(),
+    close: connectionClose
+  };
   const createChannel = vi.fn(
     (options?: {
       setup?: (channel: typeof setupChannel) => Promise<void> | void;
@@ -25,16 +52,18 @@ const amqpMocks = vi.hoisted(() => {
     }
   );
   const connect = vi.fn(() => ({
-    createChannel,
-    close: connectionClose
+    ...connection,
+    createChannel
   }));
 
   return {
     assertExchange,
     channelClose,
+    connection,
     connect,
     connectionClose,
     createChannel,
+    listeners,
     publish,
     setupResults
   };
@@ -49,11 +78,19 @@ const { RabbitMQTransport } = await import('../src/rabbitmq-transport.js');
 describe('RabbitMQTransport', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
     amqpMocks.assertExchange.mockClear();
     amqpMocks.assertExchange.mockResolvedValue(undefined);
     amqpMocks.channelClose.mockClear();
     amqpMocks.channelClose.mockResolvedValue(undefined);
+    amqpMocks.connection.on.mockClear();
+    amqpMocks.connection.removeListener.mockClear();
+    amqpMocks.listeners.clear();
     amqpMocks.connect.mockClear();
+    amqpMocks.connect.mockImplementation(() => ({
+      ...amqpMocks.connection,
+      createChannel: amqpMocks.createChannel
+    }));
     amqpMocks.connectionClose.mockClear();
     amqpMocks.connectionClose.mockResolvedValue(undefined);
     amqpMocks.createChannel.mockClear();
@@ -107,7 +144,10 @@ describe('RabbitMQTransport', () => {
     expect(amqpMocks.publish).toHaveBeenCalledWith(
       'custom.audit.events',
       'security_alert',
-      expect.any(Buffer)
+      expect.any(Buffer),
+      {
+        timeout: 5_000
+      }
     );
   });
 
@@ -152,6 +192,77 @@ describe('RabbitMQTransport', () => {
     );
   });
 
+  it('emits a warning when the RabbitMQ connection fails', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+
+    new RabbitMQTransport({ connection: 'amqp://localhost' });
+    amqpMocks.connection.emit('connectFailed', {
+      err: new Error('connect ECONNREFUSED'),
+      url: 'amqp://localhost'
+    });
+
+    expect(emitWarning).toHaveBeenCalledWith(
+      '[mapa-audit-transport-rabbitmq] rabbitmq connection failed: connect ECONNREFUSED (url: amqp://localhost)'
+    );
+  });
+
+  it('emits a warning when RabbitMQ disconnects', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+
+    new RabbitMQTransport({ connection: 'amqp://localhost' });
+    amqpMocks.connection.emit('disconnect', {
+      err: new Error('socket closed')
+    });
+
+    expect(emitWarning).toHaveBeenCalledWith(
+      '[mapa-audit-transport-rabbitmq] rabbitmq disconnected: socket closed'
+    );
+  });
+
+  it('times out a publish that never resolves without throwing', async () => {
+    vi.useFakeTimers();
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const transport = new RabbitMQTransport({
+      connection: 'amqp://localhost',
+      publishTimeoutMs: 50
+    });
+    amqpMocks.publish.mockImplementationOnce(
+      () => new Promise<boolean>(() => undefined)
+    );
+
+    const send = transport.send(auditEvent);
+
+    await vi.advanceTimersByTimeAsync(50);
+    await expect(send).resolves.toBeUndefined();
+
+    expect(emitWarning).toHaveBeenCalledWith(
+      '[mapa-audit-transport-rabbitmq] rabbitmq transport publish timed out after 50ms'
+    );
+  });
+
+  it('reports ChannelWrapper timeout rejections as publish timeouts', async () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const transport = new RabbitMQTransport({
+      connection: 'amqp://localhost',
+      publishTimeoutMs: 50
+    });
+    amqpMocks.publish.mockRejectedValueOnce(new Error('timeout'));
+
+    await expect(transport.send(auditEvent)).resolves.toBeUndefined();
+
+    expect(emitWarning).toHaveBeenCalledWith(
+      '[mapa-audit-transport-rabbitmq] rabbitmq transport publish timed out after 50ms'
+    );
+  });
+
   it('closes the channel and connection', async () => {
     const transport = new RabbitMQTransport({ connection: 'amqp://localhost' });
 
@@ -159,6 +270,18 @@ describe('RabbitMQTransport', () => {
 
     expect(amqpMocks.channelClose).toHaveBeenCalledOnce();
     expect(amqpMocks.connectionClose).toHaveBeenCalledOnce();
+  });
+
+  it('removes connection listeners on close', async () => {
+    const transport = new RabbitMQTransport({ connection: 'amqp://localhost' });
+
+    expect(amqpMocks.connection.listenerCount('connectFailed')).toBe(1);
+    expect(amqpMocks.connection.listenerCount('disconnect')).toBe(1);
+
+    await transport.close();
+
+    expect(amqpMocks.connection.listenerCount('connectFailed')).toBe(0);
+    expect(amqpMocks.connection.listenerCount('disconnect')).toBe(0);
   });
 });
 
