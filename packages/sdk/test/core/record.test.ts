@@ -34,6 +34,7 @@ const asyncTransportWarning =
   '[mapa-audit] transport send failed: transport rejected';
 const failedBuildWarningPrefix = '[mapa-audit] failed to build audit event:';
 const serviceNameError = '[mapa-audit] serviceName must be a non-empty string';
+const documentedDefaultMaxPayloadSize = 1_000_000;
 const tempDirs: string[] = [];
 
 function createCapturingTransport(): {
@@ -737,24 +738,70 @@ describe('record', () => {
     expect(events[0]?.payload).toEqual(payload);
   });
 
-  it('uses the default maxPayloadSize for normal payloads', () => {
+  it('keeps a payload exactly at the 1 MB default limit', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
     const { events, transport } = createCapturingTransport();
-    const payload = {
-      changedFields: ['title']
-    };
+    const payload = createPayloadWithSerializedSize(
+      documentedDefaultMaxPayloadSize
+    );
     const audit = createAudit({
       serviceName: 'recipes-api',
       environment: 'development',
       transports: [transport]
     });
 
+    expect(serializedPayloadSize(payload)).toBe(
+      documentedDefaultMaxPayloadSize
+    );
+
     audit.record({
       eventType: 'business',
-      eventName: 'payload.default-limit',
+      eventName: 'payload.default-limit.included',
       payload
     });
 
-    expect(events[0]?.payload).toEqual(payload);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.payload).toBe(payload);
+    expect(events[0]?.payload).not.toMatchObject({
+      truncated: true
+    });
+    expect(emitWarning).not.toHaveBeenCalled();
+  });
+
+  it('truncates a payload one byte above the 1 MB default limit', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const { events, transport } = createCapturingTransport();
+    const payload = createPayloadWithSerializedSize(
+      documentedDefaultMaxPayloadSize + 1
+    );
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    expect(serializedPayloadSize(payload)).toBe(
+      documentedDefaultMaxPayloadSize + 1
+    );
+
+    audit.record({
+      eventType: 'business',
+      eventName: 'payload.default-limit.exceeded',
+      payload
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.payload).toEqual({
+      truncated: true,
+      originalSizeBytes: documentedDefaultMaxPayloadSize + 1,
+      maxSizeBytes: documentedDefaultMaxPayloadSize
+    });
+    expect(events[0]?.payload).not.toBe(payload);
+    expect(emitWarning).not.toHaveBeenCalled();
   });
 
   it('does not throw or dispatch from an audit instance when payload has a circular reference', () => {
@@ -1316,4 +1363,24 @@ async function createTempFilePath(fileName: string): Promise<string> {
   tempDirs.push(dir);
 
   return join(dir, fileName);
+}
+
+function createPayloadWithSerializedSize(
+  targetSizeBytes: number
+): Record<string, unknown> {
+  const emptyPayload = { value: '' };
+  const structuralSize = serializedPayloadSize(emptyPayload);
+  const contentSize = targetSizeBytes - structuralSize;
+
+  if (contentSize < 0) {
+    throw new Error('target payload size is smaller than JSON structure');
+  }
+
+  return {
+    value: 'x'.repeat(contentSize)
+  };
+}
+
+function serializedPayloadSize(payload: Record<string, unknown>): number {
+  return Buffer.byteLength(JSON.stringify(payload), 'utf8');
 }
