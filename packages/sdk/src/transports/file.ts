@@ -7,7 +7,14 @@ import {
   type AuditEventCsvColumn
 } from '../core/flatten.js';
 import type { Transport } from '../core/transport.js';
+import { isStringMember } from '../core/validation.js';
 import { emitAuditWarning, errorMessage } from '../core/warnings.js';
+
+const fileTransportFormats = ['jsonl', 'csv', 'text'] as const;
+type FileTransportFormat = (typeof fileTransportFormats)[number];
+const defaultFileTransportFormat: FileTransportFormat = 'jsonl';
+const invalidFileTransportFormatMessage =
+  '[mapa-audit] invalid FileTransport format; expected one of: jsonl, csv, text';
 
 /** Options for `FileTransport`. */
 export interface FileTransportOptions {
@@ -22,7 +29,7 @@ export interface FileTransportOptions {
    *
    * @default "jsonl"
    */
-  format?: 'jsonl' | 'csv' | 'text';
+  format?: FileTransportFormat;
 }
 
 /**
@@ -38,15 +45,28 @@ export interface FileTransportOptions {
  */
 export class FileTransport implements Transport {
   readonly #path: string;
-  readonly #format: NonNullable<FileTransportOptions['format']>;
+  readonly #format: FileTransportFormat;
   #pendingWrite: Promise<void> = Promise.resolve();
   #directoryReady: Promise<void> | undefined;
   #headerWritten = false;
 
-  /** Creates a file transport using the selected append-only output format. */
+  /**
+   * Creates a file transport using the selected append-only output format.
+   *
+   * @throws Error when `format` is not one of `jsonl`, `csv`, or `text`.
+   */
   constructor(options: FileTransportOptions) {
+    const format: unknown =
+      options.format === undefined
+        ? defaultFileTransportFormat
+        : options.format;
+
+    if (!isStringMember(format, fileTransportFormats)) {
+      throw new Error(invalidFileTransportFormatMessage);
+    }
+
     this.#path = options.path;
-    this.#format = options.format ?? 'jsonl';
+    this.#format = format;
   }
 
   /**

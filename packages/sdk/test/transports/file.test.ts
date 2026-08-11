@@ -16,9 +16,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AuditEvent } from '@tnet06/mapa-audit-types';
 import { AUDIT_EVENT_CSV_COLUMNS } from '../../src/core/flatten.js';
-import { FileTransport } from '../../src/transports/file.js';
+import {
+  FileTransport,
+  type FileTransportOptions
+} from '../../src/transports/file.js';
 
 const tempDirs: string[] = [];
+const invalidFormatError =
+  '[mapa-audit] invalid FileTransport format; expected one of: jsonl, csv, text';
 
 const fullEvent: AuditEvent = {
   id: 'event-1',
@@ -68,6 +73,53 @@ afterEach(async () => {
 });
 
 describe('FileTransport', () => {
+  it.each([
+    ['null', null],
+    ['empty string', ''],
+    ['whitespace', '   '],
+    ['json', 'json'],
+    ['CSV', 'CSV'],
+    ['number', 42],
+    ['boolean', false],
+    ['object', {}],
+    ['symbol', Symbol('csv')]
+  ])('rejects invalid format during construction: %s', (_caseName, format) => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+
+    expect(() => {
+      new FileTransport(
+        createUnsafeFileTransportOptions('/tmp/events.log', format)
+      );
+    }).toThrow(invalidFormatError);
+
+    expect(fs.mkdir).not.toHaveBeenCalled();
+    expect(fs.appendFile).not.toHaveBeenCalled();
+    expect(emitWarning).not.toHaveBeenCalled();
+  });
+
+  it('does not call toString on invalid format values while validating', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const invalidFormat = {
+      toString() {
+        throw new Error('toString should not run');
+      }
+    };
+
+    expect(() => {
+      new FileTransport(
+        createUnsafeFileTransportOptions('/tmp/events.log', invalidFormat)
+      );
+    }).toThrow(invalidFormatError);
+
+    expect(fs.mkdir).not.toHaveBeenCalled();
+    expect(fs.appendFile).not.toHaveBeenCalled();
+    expect(emitWarning).not.toHaveBeenCalled();
+  });
+
   it('appends nested JSON lines by default', async () => {
     const filePath = await createTempFilePath('events.jsonl');
     const transport = new FileTransport({ path: filePath });
@@ -84,6 +136,32 @@ describe('FileTransport', () => {
     expect(lines).toHaveLength(2);
     expect(JSON.parse(lines[0] ?? '')).toEqual(fullEvent);
     expect(JSON.parse(lines[1] ?? '')).toEqual(secondEvent);
+  });
+
+  it('uses JSONL when JavaScript explicitly passes format undefined', async () => {
+    const filePath = await createTempFilePath('events-undefined-format.jsonl');
+    const transport = new FileTransport(
+      createUnsafeFileTransportOptions(filePath, undefined)
+    );
+
+    await transport.send(fullEvent);
+
+    const content = await readFile(filePath, 'utf8');
+
+    expect(JSON.parse(content.trimEnd())).toEqual(fullEvent);
+  });
+
+  it.each([
+    ['jsonl', 'events.jsonl'],
+    ['csv', 'events.csv'],
+    ['text', 'events.txt']
+  ] as const)('accepts canonical format %s', async (format, fileName) => {
+    const filePath = await createTempFilePath(fileName);
+    const transport = new FileTransport({ path: filePath, format });
+
+    await transport.send(fullEvent);
+
+    await expect(readFile(filePath, 'utf8')).resolves.not.toBe('');
   });
 
   it('creates the destination directory only once for repeated sends', async () => {
@@ -321,6 +399,13 @@ async function createTempFilePath(fileName: string): Promise<string> {
   tempDirs.push(dir);
 
   return join(dir, fileName);
+}
+
+function createUnsafeFileTransportOptions(
+  path: string,
+  format: unknown
+): FileTransportOptions {
+  return { path, format } as unknown as FileTransportOptions;
 }
 
 function cell(
