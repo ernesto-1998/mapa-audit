@@ -1,8 +1,12 @@
 {
   "name": "@tnet06/mapa-audit-transport-rabbitmq",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/ernesto-1998/mapa-audit.git",
+    "directory": "packages/transport-rabbitmq"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -15,11 +19,18 @@
   "files": [
     "dist"
   ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "tsc -b tsconfig.build.json"
+    "build": "tsc -b tsconfig.build.json",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@tnet06/mapa-audit-types": "0.0.0",
+    "@tnet06/mapa-audit-types": "0.1.0",
     "amqp-connection-manager": "^4.1.14"
   }
 }
