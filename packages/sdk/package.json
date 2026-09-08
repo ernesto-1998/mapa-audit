@@ -1,12 +1,26 @@
 {
   "name": "@tnet06/mapa-audit-sdk",
   "version": "0.1.0",
+  "description": "Structured audit and business observability SDK for Node.js.",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+ssh://git@github.com/ernesto-1998/mapa-audit.git",
     "directory": "packages/sdk"
   },
+  "homepage": "https://github.com/ernesto-1998/mapa-audit#readme",
+  "bugs": {
+    "url": "https://github.com/ernesto-1998/mapa-audit/issues"
+  },
+  "keywords": [
+    "audit",
+    "observability",
+    "typescript",
+    "nodejs",
+    "express",
+    "fastify",
+    "nestjs"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

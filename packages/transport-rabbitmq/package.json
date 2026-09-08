@@ -1,12 +1,25 @@
 {
   "name": "@tnet06/mapa-audit-transport-rabbitmq",
   "version": "0.1.0",
+  "description": "RabbitMQ transport for the Mapa Audit SDK.",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+ssh://git@github.com/ernesto-1998/mapa-audit.git",
     "directory": "packages/transport-rabbitmq"
   },
+  "homepage": "https://github.com/ernesto-1998/mapa-audit#readme",
+  "bugs": {
+    "url": "https://github.com/ernesto-1998/mapa-audit/issues"
+  },
+  "keywords": [
+    "audit",
+    "observability",
+    "rabbitmq",
+    "amqp",
+    "typescript",
+    "nodejs"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

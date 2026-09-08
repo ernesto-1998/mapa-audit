@@ -165,14 +165,14 @@ the JSON body to snake_case.
 Only the routing key is derived from `event.eventType` and converted from
 camelCase to snake_case:
 
-| Event field                        | Routing key      | Exchange       |
-| ---------------------------------- | ---------------- | -------------- |
-| `event.eventType: "business"`      | `business`       | `audit.events` |
-| `event.eventType: "security"`      | `security`       | `audit.events` |
-| `event.eventType: "securityAlert"` | `security_alert` | `audit.events` |
+| Event field                   | Routing key | Exchange       |
+| ----------------------------- | ----------- | -------------- |
+| `event.eventType: "business"` | `business`  | `audit.events` |
+| `event.eventType: "security"` | `security`  | `audit.events` |
 
-The current canonical event types are simple words such as `business`,
-`security`, and `system`, but the conversion is generic.
+The six current canonical event types are simple words: `request`, `business`,
+`audit`, `error`, `security`, and `system`. The implementation still applies a
+generic camelCase-to-snake_case conversion to the routing key before publishing.
 
 ## Exchange and Topology
 

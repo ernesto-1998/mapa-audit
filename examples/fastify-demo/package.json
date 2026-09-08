@@ -9,7 +9,7 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
-    "@tnet06/mapa-audit-sdk": "0.0.0",
+    "@tnet06/mapa-audit-sdk": "0.1.0",
     "fastify": "^5.11.0"
   }
 }

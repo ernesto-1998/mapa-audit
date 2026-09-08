@@ -1,12 +1,24 @@
 {
   "name": "@tnet06/mapa-audit-types",
   "version": "0.1.0",
+  "description": "Shared TypeScript contracts and runtime constants for Mapa Audit events.",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+ssh://git@github.com/ernesto-1998/mapa-audit.git",
     "directory": "packages/types"
   },
+  "homepage": "https://github.com/ernesto-1998/mapa-audit#readme",
+  "bugs": {
+    "url": "https://github.com/ernesto-1998/mapa-audit/issues"
+  },
+  "keywords": [
+    "audit",
+    "observability",
+    "typescript",
+    "nodejs",
+    "types"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
