@@ -128,13 +128,14 @@ describe('RabbitMQTransport', () => {
       connection: ['amqp://one', 'amqp://two'],
       connectionOptions: acceptedConnectionOptions
     });
-    const [, passedConnectionOptions] = amqpMocks.connect.mock.calls[0] ?? [];
+    const firstConnectCall = amqpMocks.connect.mock.calls[0] as
+      readonly unknown[] | undefined;
 
     expect(amqpMocks.connect).toHaveBeenCalledWith(
       ['amqp://one', 'amqp://two'],
       connectionOptions
     );
-    expect(passedConnectionOptions).toBe(connectionOptions);
+    expect(firstConnectCall?.[1]).toBe(connectionOptions);
   });
 
   it('publishes with the configured exchange and a snake_case routing key', async () => {
@@ -467,9 +468,9 @@ async function waitForSetup(): Promise<void> {
   await Promise.all(amqpMocks.setupResults);
 }
 
-function emittedWarning(
-  emitWarning: ReturnType<typeof vi.spyOn<typeof process, 'emitWarning'>>
-): string {
+function emittedWarning(emitWarning: {
+  mock: { calls: Array<readonly unknown[]> };
+}): string {
   return String(emitWarning.mock.calls[0]?.[0]);
 }
 
