@@ -1,4 +1,5 @@
 import type { AuditEvent } from '@tnet06/mapa-audit-types';
+import type { RabbitMQConnectionOptions } from '../src/rabbitmq-transport.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const amqpMocks = vi.hoisted(() => {
@@ -113,20 +114,27 @@ describe('RabbitMQTransport', () => {
   });
 
   it('passes connection URLs and connection options to amqp-connection-manager', () => {
-    const connectionOptions = {
-      heartbeatIntervalInSeconds: 10,
-      reconnectTimeInSeconds: 2
+    interface CustomConnectionOptions {
+      reconnectTimeInSeconds?: number;
+    }
+
+    const connectionOptions: CustomConnectionOptions = {
+      reconnectTimeInSeconds: 5
     };
+    const acceptedConnectionOptions: RabbitMQConnectionOptions =
+      connectionOptions;
 
     new RabbitMQTransport({
       connection: ['amqp://one', 'amqp://two'],
-      connectionOptions
+      connectionOptions: acceptedConnectionOptions
     });
+    const [, passedConnectionOptions] = amqpMocks.connect.mock.calls[0] ?? [];
 
     expect(amqpMocks.connect).toHaveBeenCalledWith(
       ['amqp://one', 'amqp://two'],
       connectionOptions
     );
+    expect(passedConnectionOptions).toBe(connectionOptions);
   });
 
   it('publishes with the configured exchange and a snake_case routing key', async () => {

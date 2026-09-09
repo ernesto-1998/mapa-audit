@@ -22,6 +22,16 @@ interface DisconnectEvent {
   err?: unknown;
 }
 
+/**
+ * Pass-through RabbitMQ connection-manager options.
+ *
+ * This type is deliberately generic so this package's public declarations do
+ * not expose `amqp-connection-manager` internals. Valid properties depend on
+ * the installed `amqp-connection-manager` version; this transport forwards the
+ * object directly and does not interpret or validate it.
+ */
+export type RabbitMQConnectionOptions = object;
+
 /** Options for `RabbitMQTransport`. */
 export interface RabbitMQTransportOptions {
   /**
@@ -41,9 +51,10 @@ export interface RabbitMQTransportOptions {
    * Pass-through connection options for `amqp-connection-manager.connect()`.
    *
    * The transport does not interpret these options; it forwards them directly
-   * to the broker client.
+   * to the broker client. The public type is intentionally generic to avoid
+   * coupling this package's declarations to dependency-internal types.
    */
-  connectionOptions?: AmqpConnectionManagerOptions;
+  connectionOptions?: RabbitMQConnectionOptions;
   /**
    * Maximum time to wait for one publish operation before reporting it as
    * failed from this transport.
@@ -80,7 +91,9 @@ export class RabbitMQTransport implements Transport {
     this.#exchange = options.exchange ?? defaultExchange;
     this.#publishTimeoutMs =
       options.publishTimeoutMs ?? defaultPublishTimeoutMs;
-    this.#connection = connect(options.connection, options.connectionOptions);
+    const connectionOptions = options.connectionOptions as
+      AmqpConnectionManagerOptions | undefined;
+    this.#connection = connect(options.connection, connectionOptions);
     this.#connection.on('connectFailed', this.#onConnectFailed);
     this.#connection.on('disconnect', this.#onDisconnect);
     this.#channel = this.#connection.createChannel({
@@ -131,7 +144,7 @@ export class RabbitMQTransport implements Transport {
    * Closes the RabbitMQ channel and connection.
    *
    * `amqp-connection-manager` does not expose a separate public drain hook for
-   * in-flight publishes beyond `ChannelWrapper.close()`. This transport does
+   * in-flight publishes beyond its channel close behavior. This transport does
    * not add custom buffering, so broker-client lifecycle remains the library's
    * concern.
    */
