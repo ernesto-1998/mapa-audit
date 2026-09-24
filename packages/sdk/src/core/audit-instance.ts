@@ -57,6 +57,16 @@ export interface AuditConfig {
  */
 export interface AuditInstance {
   /**
+   * Builds and returns one canonical audit event without dispatching it.
+   *
+   * This method is synchronous and may throw validation, serialization, or clone
+   * errors to the caller. The returned event is a deep snapshot owned by the
+   * caller; mutating it does not mutate request context, input objects, service
+   * metadata, or later events. It remains available after `shutdown()` starts,
+   * unlike `record()`, because it does not use transports.
+   */
+  buildEvent(input: RecordInput): AuditEvent;
+  /**
    * Builds and dispatches one audit event to this instance's transports.
    *
    * This method is fire-and-forget: transport errors are contained and reported
@@ -132,6 +142,9 @@ export function createAudit(config: AuditConfig): AuditInstance {
   let shutdownPromise: Promise<void> | undefined;
 
   return {
+    buildEvent(input) {
+      return structuredClone(buildAuditEvent(input, service, payloadOptions));
+    },
     record(input) {
       if (isShutdown) {
         return;

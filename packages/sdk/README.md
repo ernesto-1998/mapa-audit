@@ -60,6 +60,7 @@ implementation details even if compiled files exist inside `dist/`.
 
 ```ts
 import {
+  buildEvent,
   createAudit,
   getGlobalAudit,
   initGlobalAudit,
@@ -141,7 +142,8 @@ opens the request context; `record()` later reads that context automatically.
 Every transport receives a canonical nested `AuditEvent` from
 `@tnet06/mapa-audit-types`. Application code does not build this full event
 directly. Instead, it passes a smaller `RecordInput` to `record()` or
-`audit.record()`.
+`audit.record()`, or to `buildEvent()` / `audit.buildEvent()` when it needs the
+canonical event value without dispatching it.
 
 The SDK generates `id` and `occurredAt`, service metadata comes from
 configuration, framework adapters provide request/correlation/actor context when
@@ -222,21 +224,24 @@ initGlobalAudit({
 
 ## Recording Events
 
-`RecordInput` is the object passed to `record(input)` or `audit.record(input)`.
+`RecordInput` is the object passed to `record(input)`, `audit.record(input)`,
+`buildEvent(input)`, or `audit.buildEvent(input)`.
 
-| Field       | Required | Default | Behavior                                                                                |
-| ----------- | -------- | ------- | --------------------------------------------------------------------------------------- |
-| `eventType` | Yes      | none    | Must be one canonical event type; validated at runtime                                  |
-| `eventName` | Yes      | none    | Non-empty application-defined name; validated at runtime                                |
-| `severity`  | No       | `info`  | If provided, must be one canonical severity; `null` is invalid                          |
-| `outcome`   | No       | omitted | If provided, must be `success`, `failure`, or `partial`; `undefined` means absent       |
-| `entity`    | No       | omitted | Domain object affected by the event                                                     |
-| `payload`   | No       | `{}`    | Custom event data; payload safety rules run before dispatch to any configured transport |
+| Field       | Required | Default | Behavior                                                                               |
+| ----------- | -------- | ------- | -------------------------------------------------------------------------------------- |
+| `eventType` | Yes      | none    | Must be one canonical event type; validated at runtime                                 |
+| `eventName` | Yes      | none    | Non-empty application-defined name; validated at runtime                               |
+| `severity`  | No       | `info`  | If provided, must be one canonical severity; `null` is invalid                         |
+| `outcome`   | No       | omitted | If provided, must be `success`, `failure`, or `partial`; `undefined` means absent      |
+| `entity`    | No       | omitted | Domain object affected by the event                                                    |
+| `payload`   | No       | `{}`    | Custom event data; payload safety rules run before the event is returned or dispatched |
 
-Invalid event classification or an invalid `eventName` is contained by the
-fire-and-forget boundary: the event is discarded, a `[mapa-audit]` warning is
-emitted, and the host application's business logic does not receive an
-exception.
+For `record()`, invalid event classification or an invalid `eventName` is
+contained by the fire-and-forget boundary: the event is discarded, a
+`[mapa-audit]` warning is emitted, and the host application's business logic
+does not receive an exception. For `buildEvent()`, the same validation error is
+thrown synchronously to the caller without dispatching an event or emitting a
+warning.
 
 ## Global API and Instance API
 
@@ -250,6 +255,7 @@ configuration per process, initialized once during startup.
 
 ```ts
 import {
+  buildEvent,
   getGlobalAudit,
   initGlobalAudit,
   record,
@@ -260,6 +266,13 @@ import {
 initGlobalAudit({
   serviceName: 'billing-api',
   environment: 'production'
+});
+
+const event = buildEvent({
+  eventType: 'business',
+  eventName: 'invoice.previewed',
+  outcome: 'success',
+  entity: { type: 'invoice', id: 'inv-123' }
 });
 
 record({
@@ -274,16 +287,19 @@ await shutdownGlobalAudit();
 resetGlobalAudit();
 ```
 
-| Function                | Behavior                                                                                           |
-| ----------------------- | -------------------------------------------------------------------------------------------------- |
-| `initGlobalAudit()`     | Creates the global singleton by delegating to `createAudit()`                                      |
-| `record()`              | Delegates to the global instance; warns once and discards events if the global was not initialized |
-| `getGlobalAudit()`      | Returns `{ configured, serviceName, environment, transportCount }` or `undefined`                  |
-| `shutdownGlobalAudit()` | Drains the current global instance if it exists; it does not clear/reset the singleton             |
-| `resetGlobalAudit()`    | Clears the singleton and one-time warning state; intended for tests or controlled reinitialization |
+| Function                | Behavior                                                                                            |
+| ----------------------- | --------------------------------------------------------------------------------------------------- |
+| `initGlobalAudit()`     | Creates the global singleton by delegating to `createAudit()`                                       |
+| `buildEvent()`          | Delegates to the global instance and returns an independent event snapshot; throws if uninitialized |
+| `record()`              | Delegates to the global instance; warns once and discards events if the global was not initialized  |
+| `getGlobalAudit()`      | Returns `{ configured, serviceName, environment, transportCount }` or `undefined`                   |
+| `shutdownGlobalAudit()` | Drains the current global instance if it exists; it does not clear/reset the singleton              |
+| `resetGlobalAudit()`    | Clears the singleton and one-time warning state; intended for tests or controlled reinitialization  |
 
 `record()` is fire-and-forget. `shutdownGlobalAudit()` can reject if a
-configured transport's `close()` rejects.
+configured transport's `close()` rejects. `buildEvent()` does not dispatch to
+transports or emit construction warnings; it returns a deep mutable snapshot or
+throws to the caller.
 
 ### Instance API
 
@@ -311,14 +327,31 @@ audit.record({
   outcome: 'success'
 });
 
+const event = audit.buildEvent({
+  eventType: 'audit',
+  eventName: 'tenant.report_previewed',
+  outcome: 'success'
+});
+
 await audit.shutdown();
 ```
 
-| Method       | Behavior                                                                                                           |
-| ------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `record()`   | Builds an `AuditEvent` and dispatches it fire-and-forget to this instance's transports                             |
-| `shutdown()` | Idempotently calls `close()` on transports that implement it; after shutdown starts, `record()` is a no-op         |
-| `getInfo()`  | Returns `{ configured, serviceName, environment, transportCount }` without exposing transports or mutating methods |
+| Method         | Behavior                                                                                                           |
+| -------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `buildEvent()` | Builds and returns an independent `AuditEvent` snapshot without calling transports; construction errors throw      |
+| `record()`     | Builds an `AuditEvent` and dispatches it fire-and-forget to this instance's transports                             |
+| `shutdown()`   | Idempotently calls `close()` on transports that implement it; after shutdown starts, `record()` is a no-op         |
+| `getInfo()`    | Returns `{ configured, serviceName, environment, transportCount }` without exposing transports or mutating methods |
+
+Use `buildEvent()` when the application wants to own the canonical event value,
+for example to persist it through an application-managed transaction or pass it
+to another layer. The result is a deep mutable snapshot that does not share
+references with request context, service metadata, entity input, or payload
+input. The fields from request context still depend on an active adapter-created
+`AsyncLocalStorage` context. Mapa Audit does not provide transaction guarantees
+for `buildEvent()`; those belong to the persistence mechanism the application
+uses. `buildEvent()` keeps working after `shutdown()` starts because it does not
+use transports.
 
 ## Framework Adapters
 
@@ -693,17 +726,21 @@ or controlled reinitialization.
 
 Configuration errors fail fast. Runtime event dispatch remains fire-and-forget.
 
-| Situation                                           | Behavior                                                                                  |
-| --------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Invalid or empty `serviceName`                      | Throws synchronously during `createAudit()` / `initGlobalAudit()` with `[mapa-audit]`     |
-| Invalid `environment`                               | Throws synchronously during `createAudit()` / `initGlobalAudit()` with `[mapa-audit]`     |
-| Invalid `FileTransport.format`                      | Throws synchronously in the `FileTransport` constructor with `[mapa-audit]`               |
-| Invalid `record()` input                            | Emits `[mapa-audit] failed to build audit event: ...`, discards the event, does not throw |
-| Circular, non-serializable, or non-clonable payload | Emits `[mapa-audit] failed to build audit event: ...`, discards the event, does not throw |
-| Global `record()` before `initGlobalAudit()`        | Emits one `[mapa-audit]` warning per process, discards events, does not throw             |
-| Sync or async `Transport.send()` failure            | Emits `[mapa-audit] transport send failed: ...`; other transports remain isolated         |
-| `Transport.close()` failure during shutdown         | `shutdown()` / `shutdownGlobalAudit()` can reject                                         |
-| `record()` after instance shutdown has started      | No-op                                                                                     |
+| Situation                                                             | Behavior                                                                                  |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Invalid or empty `serviceName`                                        | Throws synchronously during `createAudit()` / `initGlobalAudit()` with `[mapa-audit]`     |
+| Invalid `environment`                                                 | Throws synchronously during `createAudit()` / `initGlobalAudit()` with `[mapa-audit]`     |
+| Invalid `FileTransport.format`                                        | Throws synchronously in the `FileTransport` constructor with `[mapa-audit]`               |
+| Invalid `buildEvent()` input                                          | Throws synchronously to the caller; no warning is emitted                                 |
+| Invalid `record()` input                                              | Emits `[mapa-audit] failed to build audit event: ...`, discards the event, does not throw |
+| Circular, non-serializable, or non-clonable payload in `buildEvent()` | Throws synchronously to the caller; no warning is emitted                                 |
+| Circular, non-serializable, or non-clonable payload                   | Emits `[mapa-audit] failed to build audit event: ...`, discards the event, does not throw |
+| Global `buildEvent()` before `initGlobalAudit()`                      | Throws `[mapa-audit] buildEvent() called before initGlobalAudit()`                        |
+| Global `record()` before `initGlobalAudit()`                          | Emits one `[mapa-audit]` warning per process, discards events, does not throw             |
+| Sync or async `Transport.send()` failure                              | Emits `[mapa-audit] transport send failed: ...`; other transports remain isolated         |
+| `Transport.close()` failure during shutdown                           | `shutdown()` / `shutdownGlobalAudit()` can reject                                         |
+| `record()` after instance shutdown has started                        | No-op                                                                                     |
+| `buildEvent()` after instance shutdown has started                    | Still builds and returns an event snapshot                                                |
 
 Warnings are emitted with `process.emitWarning`. To route them to your own
 logging system:

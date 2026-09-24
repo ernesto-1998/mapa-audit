@@ -5,7 +5,7 @@ import {
   eventTypes,
   type AuditEvent
 } from '@tnet06/mapa-audit-types';
-import { recordGlobal } from './global-audit.js';
+import { buildEventGlobal, recordGlobal } from './global-audit.js';
 import { getContext } from './storage.js';
 import type { Transport } from './transport.js';
 import { isNonBlankString, isStringMember } from './validation.js';
@@ -47,6 +47,22 @@ const defaultMaxPayloadSize = 1_000_000;
  */
 export function record(input: RecordInput): void {
   recordGlobal(input);
+}
+
+/**
+ * Builds one canonical audit event through the global audit singleton.
+ *
+ * Call `initGlobalAudit()` before using this helper. Unlike `record()`, this
+ * function does not dispatch to transports and does not contain construction
+ * errors as warnings: it returns a fully independent mutable event snapshot or
+ * throws to the caller. Request, actor, and correlation fields are included only
+ * when an active AsyncLocalStorage context exists.
+ *
+ * @param input Event fields supplied by the caller.
+ * @returns A canonical `AuditEvent` snapshot for the caller to own.
+ */
+export function buildEvent(input: RecordInput): AuditEvent {
+  return buildEventGlobal(input);
 }
 
 export function buildAuditEvent(

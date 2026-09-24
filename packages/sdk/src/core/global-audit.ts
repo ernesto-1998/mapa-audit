@@ -4,6 +4,7 @@ import {
   type AuditInstance,
   type GlobalAuditInfo
 } from './audit-instance.js';
+import type { AuditEvent } from '@tnet06/mapa-audit-types';
 import type { RecordInput } from './record.js';
 
 let globalAudit: AuditInstance | undefined;
@@ -30,6 +31,16 @@ export function recordGlobal(input: RecordInput): void {
   }
 
   globalAudit.record(input);
+}
+
+export function buildEventGlobal(input: RecordInput): AuditEvent {
+  if (globalAudit === undefined) {
+    throw new Error(
+      '[mapa-audit] buildEvent() called before initGlobalAudit()'
+    );
+  }
+
+  return globalAudit.buildEvent(input);
 }
 
 /**

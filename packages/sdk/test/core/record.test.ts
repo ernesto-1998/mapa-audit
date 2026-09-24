@@ -19,8 +19,13 @@ import {
   resetGlobalAudit,
   shutdownGlobalAudit
 } from '../../src/core/global-audit.js';
-import { record, type RecordInput } from '../../src/core/record.js';
-import { contextStore, type RequestContext } from '../../src/core/storage.js';
+import { buildEvent, record, type RecordInput } from '../../src/core/record.js';
+import {
+  contextStore,
+  getContext,
+  setActor,
+  type RequestContext
+} from '../../src/core/storage.js';
 import type { Transport } from '../../src/core/transport.js';
 import { FileTransport } from '../../src/transports/file.js';
 
@@ -212,6 +217,507 @@ describe('record', () => {
       payload: {}
     });
     expect(events[0]?.correlationId).toBeUndefined();
+  });
+
+  it('buildEvent returns a complete independent AuditEvent snapshot', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    let sendCount = 0;
+    const transport: Transport = {
+      send() {
+        sendCount += 1;
+      }
+    };
+    const context: RequestContext = {
+      correlationId: 'correlation-1',
+      causationId: 'causation-1',
+      request: {
+        httpMethod: 'PATCH',
+        endpoint: '/original',
+        routePattern: '/entities/:id',
+        ipAddress: '127.0.0.1',
+        userAgent: 'vitest'
+      },
+      actor: {
+        type: 'service',
+        userId: 'service-1'
+      }
+    };
+    const updatedActor: NonNullable<RequestContext['actor']> = {
+      type: 'user',
+      userId: 'user-1',
+      userRole: 'admin'
+    };
+    const entity = {
+      type: 'entity',
+      id: 'entity-1'
+    };
+    const payload = {
+      nested: {
+        secret: 'original'
+      },
+      amount: 42
+    };
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      serviceVersion: '1.2.3',
+      instanceId: 'recipes-api-01',
+      environment: 'staging',
+      transports: [transport]
+    });
+
+    contextStore.run(context, () => {
+      setActor(updatedActor);
+
+      const first = audit.buildEvent({
+        eventType: 'audit',
+        eventName: 'entity.changed',
+        severity: 'warn',
+        outcome: 'success',
+        entity,
+        payload
+      });
+      const firstPayloadNested = first.payload?.nested as
+        Record<string, unknown> | undefined;
+
+      expect(first.id).toMatch(uuidPattern);
+      expect(first.occurredAt).toEqual(expect.any(String));
+      expect(first).toMatchObject({
+        correlationId: 'correlation-1',
+        causationId: 'causation-1',
+        eventType: 'audit',
+        eventName: 'entity.changed',
+        severity: 'warn',
+        outcome: 'success',
+        service: {
+          name: 'recipes-api',
+          version: '1.2.3',
+          environment: 'staging',
+          instanceId: 'recipes-api-01'
+        },
+        request: {
+          endpoint: '/original'
+        },
+        actor: updatedActor,
+        entity,
+        payload
+      });
+      expect(sendCount).toBe(0);
+      expect(emitWarning).not.toHaveBeenCalled();
+      expect(first.request).not.toBe(context.request);
+      expect(first.actor).not.toBe(context.actor);
+      expect(first.actor).not.toBe(updatedActor);
+      expect(first.entity).not.toBe(entity);
+      expect(first.payload).not.toBe(payload);
+      expect(firstPayloadNested).not.toBe(payload.nested);
+
+      first.service.name = 'mutated-service';
+      first.request!.endpoint = '/mutated';
+      first.actor!.userId = 'mutated-user';
+      first.entity!.id = 'mutated-entity';
+      firstPayloadNested!.secret = 'mutated-secret';
+
+      const currentContext = getContext();
+
+      expect(currentContext?.request?.endpoint).toBe('/original');
+      expect(currentContext?.actor?.userId).toBe('user-1');
+      expect(payload.nested.secret).toBe('original');
+      expect(entity.id).toBe('entity-1');
+
+      const second = audit.buildEvent({
+        eventType: 'audit',
+        eventName: 'entity.changed',
+        entity,
+        payload
+      });
+      const secondPayloadNested = second.payload?.nested as
+        Record<string, unknown> | undefined;
+
+      expect(second.service).not.toBe(first.service);
+      expect(second.request).not.toBe(first.request);
+      expect(second.actor).not.toBe(first.actor);
+      expect(second.entity).not.toBe(first.entity);
+      expect(second.payload).not.toBe(first.payload);
+      expect(second.service.name).toBe('recipes-api');
+      expect(second.request?.endpoint).toBe('/original');
+      expect(second.actor?.userId).toBe('user-1');
+      expect(second.entity?.id).toBe('entity-1');
+      expect(secondPayloadNested?.secret).toBe('original');
+    });
+  });
+
+  it('buildEvent applies maskedFields without mutating the original payload', () => {
+    const originalPayload = {
+      creditCard: '4111111111111111',
+      user: {
+        ssn: '123-45-6789',
+        name: 'Ada'
+      }
+    };
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      maskedFields: ['creditCard', 'user.ssn']
+    });
+
+    const event = audit.buildEvent({
+      eventType: 'business',
+      eventName: 'payment.created',
+      payload: originalPayload
+    });
+
+    expect(event.payload).toEqual({
+      creditCard: '***',
+      user: {
+        ssn: '***',
+        name: 'Ada'
+      }
+    });
+    expect(originalPayload).toEqual({
+      creditCard: '4111111111111111',
+      user: {
+        ssn: '123-45-6789',
+        name: 'Ada'
+      }
+    });
+    expect(event.payload).not.toBe(originalPayload);
+    expect(event.payload?.user).not.toBe(originalPayload.user);
+  });
+
+  it('buildEvent replaces payloads that exceed maxPayloadSize', () => {
+    const payload = {
+      message: 'this payload is too large'
+    };
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      maxPayloadSize: 10
+    });
+
+    const event = audit.buildEvent({
+      eventType: 'business',
+      eventName: 'payload.large',
+      payload
+    });
+
+    expect(event.payload).toEqual({
+      truncated: true,
+      originalSizeBytes: Buffer.byteLength(JSON.stringify(payload), 'utf8'),
+      maxSizeBytes: 10
+    });
+    expect(event.payload).not.toBe(payload);
+  });
+
+  it.each([
+    ['eventType', { eventName: 'invalid.event' }, 'invalid eventType'],
+    [
+      'eventName',
+      { eventType: 'business', eventName: '   ' },
+      'eventName must be a non-empty string'
+    ],
+    [
+      'severity',
+      {
+        eventType: 'business',
+        eventName: 'invalid.severity',
+        severity: 'fatal'
+      },
+      'invalid severity'
+    ],
+    [
+      'outcome',
+      { eventType: 'business', eventName: 'invalid.outcome', outcome: 'maybe' },
+      'invalid outcome'
+    ]
+  ])(
+    'buildEvent throws without warning for invalid %s',
+    (_field, input, errorMessageText) => {
+      const emitWarning = vi
+        .spyOn(process, 'emitWarning')
+        .mockImplementation(() => undefined);
+      const audit = createAudit({
+        serviceName: 'recipes-api',
+        environment: 'development'
+      });
+
+      expect(() => {
+        audit.buildEvent(createUnsafeRecordInput(input));
+      }).toThrow(errorMessageText);
+      expect(emitWarning).not.toHaveBeenCalled();
+    }
+  );
+
+  it('buildEvent throws without warning for circular payloads', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const payload: Record<string, unknown> = {
+      name: 'circular-payload'
+    };
+    payload.self = payload;
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development'
+    });
+
+    expect(() => {
+      audit.buildEvent({
+        eventType: 'business',
+        eventName: 'payload.circular',
+        payload
+      });
+    }).toThrow();
+    expect(emitWarning).not.toHaveBeenCalled();
+  });
+
+  it('buildEvent throws without warning when snapshot cloning fails', () => {
+    const emitWarning = vi
+      .spyOn(process, 'emitWarning')
+      .mockImplementation(() => undefined);
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development'
+    });
+
+    expect(() => {
+      audit.buildEvent({
+        eventType: 'business',
+        eventName: 'payload.uncloneable',
+        payload: {
+          callback() {
+            return undefined;
+          }
+        }
+      });
+    }).toThrow();
+    expect(emitWarning).not.toHaveBeenCalled();
+  });
+
+  it('global buildEvent throws before initialization and works after initGlobalAudit', () => {
+    expect(() => {
+      buildEvent({
+        eventType: 'business',
+        eventName: 'before.init'
+      });
+    }).toThrow('[mapa-audit] buildEvent() called before initGlobalAudit()');
+
+    initGlobalAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: []
+    });
+
+    const event = buildEvent({
+      eventType: 'business',
+      eventName: 'after.init'
+    });
+
+    expect(event).toMatchObject({
+      eventType: 'business',
+      eventName: 'after.init',
+      service: {
+        name: 'recipes-api',
+        environment: 'development'
+      }
+    });
+  });
+
+  it('buildEvent continues after shutdown while record remains a no-op', async () => {
+    const { events, transport } = createCapturingTransport();
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development',
+      transports: [transport]
+    });
+
+    await audit.shutdown();
+
+    audit.record({
+      eventType: 'business',
+      eventName: 'after.shutdown.record'
+    });
+    const event = audit.buildEvent({
+      eventType: 'business',
+      eventName: 'after.shutdown.build'
+    });
+
+    expect(events).toHaveLength(0);
+    expect(event.eventName).toBe('after.shutdown.build');
+  });
+
+  it('buildEvent keeps concurrent request contexts isolated', async () => {
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'development'
+    });
+
+    const first = contextStore.run(
+      {
+        correlationId: 'correlation-1',
+        request: {
+          endpoint: '/first'
+        },
+        actor: {
+          type: 'user',
+          userId: 'user-1'
+        }
+      },
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        return audit.buildEvent({
+          eventType: 'business',
+          eventName: 'first'
+        });
+      }
+    );
+    const second = contextStore.run(
+      {
+        correlationId: 'correlation-2',
+        request: {
+          endpoint: '/second'
+        },
+        actor: {
+          type: 'user',
+          userId: 'user-2'
+        }
+      },
+      async () => {
+        await Promise.resolve();
+
+        return audit.buildEvent({
+          eventType: 'business',
+          eventName: 'second'
+        });
+      }
+    );
+
+    await expect(Promise.all([first, second])).resolves.toMatchObject([
+      {
+        correlationId: 'correlation-1',
+        request: {
+          endpoint: '/first'
+        },
+        actor: {
+          userId: 'user-1'
+        }
+      },
+      {
+        correlationId: 'correlation-2',
+        request: {
+          endpoint: '/second'
+        },
+        actor: {
+          userId: 'user-2'
+        }
+      }
+    ]);
+  });
+
+  it('buildEvent snapshots remain independent across audit instances in one context', () => {
+    const firstAudit = createAudit({
+      serviceName: 'first-api',
+      environment: 'development'
+    });
+    const secondAudit = createAudit({
+      serviceName: 'second-api',
+      environment: 'production'
+    });
+    const context: RequestContext = {
+      correlationId: 'correlation-1',
+      request: {
+        endpoint: '/shared'
+      },
+      actor: {
+        type: 'user',
+        userId: 'user-1'
+      }
+    };
+    const payload = {
+      nested: {
+        value: 'original'
+      }
+    };
+
+    contextStore.run(context, () => {
+      const first = firstAudit.buildEvent({
+        eventType: 'business',
+        eventName: 'first.event',
+        payload
+      });
+      const second = secondAudit.buildEvent({
+        eventType: 'business',
+        eventName: 'second.event',
+        payload
+      });
+
+      expect(first.service).not.toBe(second.service);
+      expect(first.request).not.toBe(second.request);
+      expect(first.actor).not.toBe(second.actor);
+      expect(first.payload).not.toBe(second.payload);
+
+      first.request!.endpoint = '/mutated';
+      (first.payload!.nested as Record<string, unknown>).value = 'mutated';
+
+      expect(second.request?.endpoint).toBe('/shared');
+      expect((second.payload?.nested as Record<string, unknown>).value).toBe(
+        'original'
+      );
+      expect(context.request?.endpoint).toBe('/shared');
+      expect(payload.nested.value).toBe('original');
+    });
+  });
+
+  it('buildEvent uses the same base event rules as record', () => {
+    const { events, transport } = createCapturingTransport();
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      serviceVersion: '1.2.3',
+      instanceId: 'recipes-api-01',
+      environment: 'production',
+      transports: [transport],
+      maskedFields: ['secret']
+    });
+    const context: RequestContext = {
+      correlationId: 'correlation-1',
+      causationId: 'causation-1',
+      request: {
+        endpoint: '/recipes'
+      },
+      actor: {
+        type: 'user',
+        userId: 'user-1'
+      }
+    };
+    const input: RecordInput = {
+      eventType: 'business',
+      eventName: 'recipe.updated',
+      outcome: 'success',
+      payload: {
+        secret: 'hidden',
+        visible: true
+      }
+    };
+
+    contextStore.run(context, () => {
+      const built = audit.buildEvent(input);
+      audit.record(input);
+
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        correlationId: built.correlationId,
+        causationId: built.causationId,
+        eventType: built.eventType,
+        eventName: built.eventName,
+        severity: built.severity,
+        outcome: built.outcome,
+        service: built.service,
+        request: built.request,
+        actor: built.actor,
+        payload: built.payload
+      });
+    });
   });
 
   it.each([
