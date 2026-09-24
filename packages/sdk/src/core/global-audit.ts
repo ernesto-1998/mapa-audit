@@ -65,8 +65,9 @@ export function resetGlobalAudit(): void {
 /**
  * Returns a read-only inspection view of the global audit singleton.
  *
- * The returned object contains only metadata such as service name, environment,
- * and transport count. It does not expose transports or mutating methods.
+ * The returned object contains only service identity metadata and transport
+ * count. It does not expose transports, payload safety settings, mutating
+ * methods, or the internal service object.
  */
 export function getGlobalAudit(): GlobalAuditInfo | undefined {
   return globalAudit?.getInfo();

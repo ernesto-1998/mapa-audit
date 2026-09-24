@@ -321,6 +321,12 @@ await shutdownGlobalAudit();
 resetGlobalAudit(); // intended for tests or controlled reinitialization
 ```
 
+`getGlobalAudit()` returns a new inspection snapshot with `{ configured,
+serviceName, serviceVersion?, instanceId?, environment, transportCount }`.
+`serviceVersion` and `instanceId` appear only when configured. It does not
+expose transports, payload safety settings, mutating methods, or the internal
+service object.
+
 If `record()` is called before `initGlobalAudit()`, the event is discarded and a
 warning is emitted once for the process.
 
@@ -412,7 +418,7 @@ Returned by `createAudit(config)`.
 | `buildEvent()` | Builds and returns an independent `AuditEvent` snapshot without calling transports; construction errors throw |
 | `record()`     | Builds an `AuditEvent` and dispatches it fire-and-forget to the instance's transports                         |
 | `shutdown()`   | Idempotently calls `close()` on transports that implement it; after it starts, `record()` is a no-op          |
-| `getInfo()`    | Returns `{ configured, serviceName, environment, transportCount }` without transports or mutable methods      |
+| `getInfo()`    | Returns `{ configured, serviceName, serviceVersion?, instanceId?, environment, transportCount }`              |
 
 `record()` contains `Transport.send()` errors and isolates each transport from
 the others. `buildEvent()` does not dispatch, does not emit warnings for
@@ -420,6 +426,10 @@ construction errors, and returns a deep mutable snapshot that does not share
 references with request context, service metadata, entity, or payload input.
 `shutdown()` can reject if a transport's `close()` rejects. `buildEvent()` keeps
 working after shutdown starts because it does not use transports.
+`getInfo()` returns a new inspection snapshot each time. Optional
+`serviceVersion` and `instanceId` appear only when configured, and the snapshot
+does not expose transports, payload safety settings, mutating methods, or the
+internal service object.
 
 ### Global API
 
@@ -437,6 +447,8 @@ working after shutdown starts because it does not use transports.
 the current `AsyncLocalStorage` context, so concurrent requests remain isolated.
 Use `resetGlobalAudit()` for test isolation; do not use `shutdownGlobalAudit()`
 as a reset substitute.
+`getGlobalAudit()` delegates to the same instance snapshot as `getInfo()` and
+includes optional `serviceVersion` and `instanceId` only when configured.
 
 ## Adapters
 

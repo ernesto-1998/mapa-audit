@@ -287,14 +287,20 @@ await shutdownGlobalAudit();
 resetGlobalAudit();
 ```
 
-| Function                | Behavior                                                                                            |
-| ----------------------- | --------------------------------------------------------------------------------------------------- |
-| `initGlobalAudit()`     | Creates the global singleton by delegating to `createAudit()`                                       |
-| `buildEvent()`          | Delegates to the global instance and returns an independent event snapshot; throws if uninitialized |
-| `record()`              | Delegates to the global instance; warns once and discards events if the global was not initialized  |
-| `getGlobalAudit()`      | Returns `{ configured, serviceName, environment, transportCount }` or `undefined`                   |
-| `shutdownGlobalAudit()` | Drains the current global instance if it exists; it does not clear/reset the singleton              |
-| `resetGlobalAudit()`    | Clears the singleton and one-time warning state; intended for tests or controlled reinitialization  |
+`getGlobalAudit()` returns a new inspection snapshot with `{ configured,
+serviceName, serviceVersion?, instanceId?, environment, transportCount }`.
+`serviceVersion` and `instanceId` appear only when configured. It does not
+expose transports, payload safety settings, mutating methods, or the internal
+service object.
+
+| Function                | Behavior                                                                                                        |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `initGlobalAudit()`     | Creates the global singleton by delegating to `createAudit()`                                                   |
+| `buildEvent()`          | Delegates to the global instance and returns an independent event snapshot; throws if uninitialized             |
+| `record()`              | Delegates to the global instance; warns once and discards events if the global was not initialized              |
+| `getGlobalAudit()`      | Returns `{ configured, serviceName, serviceVersion?, instanceId?, environment, transportCount }` or `undefined` |
+| `shutdownGlobalAudit()` | Drains the current global instance if it exists; it does not clear/reset the singleton                          |
+| `resetGlobalAudit()`    | Clears the singleton and one-time warning state; intended for tests or controlled reinitialization              |
 
 `record()` is fire-and-forget. `shutdownGlobalAudit()` can reject if a
 configured transport's `close()` rejects. `buildEvent()` does not dispatch to
@@ -336,12 +342,12 @@ const event = audit.buildEvent({
 await audit.shutdown();
 ```
 
-| Method         | Behavior                                                                                                           |
-| -------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `buildEvent()` | Builds and returns an independent `AuditEvent` snapshot without calling transports; construction errors throw      |
-| `record()`     | Builds an `AuditEvent` and dispatches it fire-and-forget to this instance's transports                             |
-| `shutdown()`   | Idempotently calls `close()` on transports that implement it; after shutdown starts, `record()` is a no-op         |
-| `getInfo()`    | Returns `{ configured, serviceName, environment, transportCount }` without exposing transports or mutating methods |
+| Method         | Behavior                                                                                                      |
+| -------------- | ------------------------------------------------------------------------------------------------------------- |
+| `buildEvent()` | Builds and returns an independent `AuditEvent` snapshot without calling transports; construction errors throw |
+| `record()`     | Builds an `AuditEvent` and dispatches it fire-and-forget to this instance's transports                        |
+| `shutdown()`   | Idempotently calls `close()` on transports that implement it; after shutdown starts, `record()` is a no-op    |
+| `getInfo()`    | Returns `{ configured, serviceName, serviceVersion?, instanceId?, environment, transportCount }`              |
 
 Use `buildEvent()` when the application wants to own the canonical event value,
 for example to persist it through an application-managed transaction or pass it
@@ -352,6 +358,10 @@ input. The fields from request context still depend on an active adapter-created
 for `buildEvent()`; those belong to the persistence mechanism the application
 uses. `buildEvent()` keeps working after `shutdown()` starts because it does not
 use transports.
+`getInfo()` returns a new inspection snapshot each time. Optional
+`serviceVersion` and `instanceId` appear only when configured, and the snapshot
+does not expose transports, payload safety settings, mutating methods, or the
+internal service object.
 
 ## Framework Adapters
 

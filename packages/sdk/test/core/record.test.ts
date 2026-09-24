@@ -11,7 +11,8 @@ import {
 } from '@tnet06/mapa-audit-types';
 import {
   createAudit,
-  type AuditConfig
+  type AuditConfig,
+  type GlobalAuditInfo
 } from '../../src/core/audit-instance.js';
 import {
   getGlobalAudit,
@@ -65,6 +66,20 @@ function createUnsafeAuditConfig(config: Record<string, unknown>): AuditConfig {
 function createUnsafeRecordInput(input: unknown): RecordInput {
   return input as RecordInput;
 }
+
+function expectDefined<T>(value: T | undefined): T {
+  expect(value).toBeDefined();
+
+  if (value === undefined) {
+    throw new Error('expected value to be defined');
+  }
+
+  return value;
+}
+
+type MutableGlobalAuditInfo = {
+  -readonly [Key in keyof GlobalAuditInfo]: GlobalAuditInfo[Key];
+};
 
 function expectInvalidInstanceRecord(
   input: unknown,
@@ -1838,31 +1853,137 @@ describe('initGlobalAudit', () => {
     expect(getGlobalAudit()).toBeUndefined();
   });
 
+  it('returns configured service identity from audit instance info', () => {
+    const first = createCapturingTransport();
+    const second = createCapturingTransport();
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      serviceVersion: '1.2.3',
+      instanceId: 'recipes-api-01',
+      environment: 'staging',
+      transports: [first.transport, second.transport]
+    });
+
+    const info = audit.getInfo();
+
+    expect(info).toEqual({
+      configured: true,
+      serviceName: 'recipes-api',
+      serviceVersion: '1.2.3',
+      instanceId: 'recipes-api-01',
+      environment: 'staging',
+      transportCount: 2
+    });
+  });
+
+  it('omits optional service identity fields when they are not configured', () => {
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      environment: 'staging',
+      transports: []
+    });
+
+    const info = audit.getInfo();
+
+    expect(info.serviceVersion).toBeUndefined();
+    expect(info.instanceId).toBeUndefined();
+    expect(Object.hasOwn(info, 'serviceVersion')).toBe(false);
+    expect(Object.hasOwn(info, 'instanceId')).toBe(false);
+    expect(info).toMatchObject({
+      configured: true,
+      serviceName: 'recipes-api',
+      environment: 'staging',
+      transportCount: 0
+    });
+  });
+
+  it('keeps audit info as an inspection snapshot without internal references', () => {
+    const audit = createAudit({
+      serviceName: 'recipes-api',
+      serviceVersion: '1.2.3',
+      instanceId: 'recipes-api-01',
+      environment: 'staging',
+      transports: [],
+      maskedFields: ['secret'],
+      maxPayloadSize: 64
+    });
+
+    const info = audit.getInfo();
+
+    expect(Object.hasOwn(info, 'transports')).toBe(false);
+    expect(Object.hasOwn(info, 'record')).toBe(false);
+    expect(Object.hasOwn(info, 'buildEvent')).toBe(false);
+    expect(Object.hasOwn(info, 'shutdown')).toBe(false);
+    expect(Object.hasOwn(info, 'maskedFields')).toBe(false);
+    expect(Object.hasOwn(info, 'maxPayloadSize')).toBe(false);
+    expect(Object.hasOwn(info, 'service')).toBe(false);
+
+    const mutableInfo = info as MutableGlobalAuditInfo;
+    mutableInfo.serviceName = 'mutated';
+    mutableInfo.serviceVersion = 'mutated';
+    mutableInfo.instanceId = 'mutated';
+
+    const nextInfo = audit.getInfo();
+    const event = audit.buildEvent({
+      eventType: 'system',
+      eventName: 'service.info.checked'
+    });
+
+    expect(nextInfo).not.toBe(info);
+    expect(nextInfo).toEqual({
+      configured: true,
+      serviceName: 'recipes-api',
+      serviceVersion: '1.2.3',
+      instanceId: 'recipes-api-01',
+      environment: 'staging',
+      transportCount: 0
+    });
+    expect(event.service).toEqual({
+      name: 'recipes-api',
+      version: '1.2.3',
+      instanceId: 'recipes-api-01',
+      environment: 'staging'
+    });
+  });
+
   it('returns an inspection view after global initialization', () => {
     const first = createCapturingTransport();
     const second = createCapturingTransport();
 
     initGlobalAudit({
       serviceName: 'recipes-api',
+      serviceVersion: '1.2.3',
+      instanceId: 'recipes-api-01',
       environment: 'staging',
       transports: [first.transport, second.transport]
     });
 
-    const info = getGlobalAudit();
+    const info = expectDefined(getGlobalAudit());
 
     expect(info).toEqual({
       configured: true,
       serviceName: 'recipes-api',
+      serviceVersion: '1.2.3',
+      instanceId: 'recipes-api-01',
       environment: 'staging',
       transportCount: 2
     });
-    expect(Object.hasOwn(info ?? {}, 'shutdown')).toBe(false);
-    expect(Object.hasOwn(info ?? {}, 'record')).toBe(false);
-    expect(Object.hasOwn(info ?? {}, 'transports')).toBe(false);
+    expect(Object.hasOwn(info, 'shutdown')).toBe(false);
+    expect(Object.hasOwn(info, 'record')).toBe(false);
+    expect(Object.hasOwn(info, 'buildEvent')).toBe(false);
+    expect(Object.hasOwn(info, 'transports')).toBe(false);
+    expect(Object.hasOwn(info, 'maskedFields')).toBe(false);
+    expect(Object.hasOwn(info, 'maxPayloadSize')).toBe(false);
+    expect(Object.hasOwn(info, 'service')).toBe(false);
 
-    (info as { serviceName: string }).serviceName = 'mutated';
+    const mutableInfo = info as MutableGlobalAuditInfo;
+    mutableInfo.serviceName = 'mutated';
+    mutableInfo.serviceVersion = 'mutated';
+    mutableInfo.instanceId = 'mutated';
 
     expect(getGlobalAudit()?.serviceName).toBe('recipes-api');
+    expect(getGlobalAudit()?.serviceVersion).toBe('1.2.3');
+    expect(getGlobalAudit()?.instanceId).toBe('recipes-api-01');
   });
 });
 

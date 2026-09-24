@@ -81,17 +81,27 @@ export interface AuditInstance {
   /**
    * Returns a read-only inspection snapshot for this instance.
    *
-   * The returned object does not expose transports or mutating methods.
+   * The returned object contains service identity metadata and transport count.
+   * It does not expose transports, payload safety settings, mutating methods, or
+   * the internal service object.
    */
   getInfo(): GlobalAuditInfo;
 }
 
-/** Read-only inspection view for a configured audit instance/global singleton. */
+/**
+ * Read-only inspection view for a configured audit instance/global singleton.
+ *
+ * Optional service metadata appears only when it was configured.
+ */
 export interface GlobalAuditInfo {
   /** Always true when an audit instance exists. */
   readonly configured: true;
   /** Service name configured for this audit instance. */
   readonly serviceName: string;
+  /** Optional service version configured for this audit instance. */
+  readonly serviceVersion?: string;
+  /** Optional service instance identifier configured for this audit instance. */
+  readonly instanceId?: string;
   /** Environment configured for this audit instance. */
   readonly environment: Environment;
   /** Number of transports currently configured on this instance. */
@@ -167,6 +177,12 @@ export function createAudit(config: AuditConfig): AuditInstance {
       return {
         configured: true,
         serviceName: service.name,
+        ...(service.version === undefined
+          ? {}
+          : { serviceVersion: service.version }),
+        ...(service.instanceId === undefined
+          ? {}
+          : { instanceId: service.instanceId }),
         environment: service.environment,
         transportCount: transports.length
       };
