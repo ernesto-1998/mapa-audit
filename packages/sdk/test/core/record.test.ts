@@ -136,6 +136,7 @@ describe('record', () => {
     initGlobalAudit({
       serviceName: 'recipes-api',
       serviceVersion: '1.2.3',
+      instanceId: 'recipes-api-01',
       environment: 'staging',
       transports: [transport]
     });
@@ -167,7 +168,8 @@ describe('record', () => {
       service: {
         name: 'recipes-api',
         version: '1.2.3',
-        environment: 'staging'
+        environment: 'staging',
+        instanceId: 'recipes-api-01'
       },
       request: context.request,
       actor: context.actor,

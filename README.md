@@ -183,16 +183,14 @@ that need it, such as CSV.
 
 `AuditEvent` is the transport/consumer contract. It is not the same as
 `RecordInput`, which is the smaller object application code passes to
-`record()`. Some fields are part of the shared event contract but are not
-currently configurable through the SDK core:
+`record()`. One field is part of the shared event contract but is not currently
+configurable through the SDK core:
 
 - `payloadSchemaVersion` exists on `AuditEvent`, but `RecordInput` does not yet
   expose a way to set it.
-- `service.instanceId` exists on `AuditEvent`, but `AuditConfig` does not yet
-  configure it.
 
-Do not treat those fields as current core features unless a future release adds
-public configuration for them.
+Do not treat that field as a current core feature unless a future release adds
+public configuration for it.
 
 ### Classification Model
 
@@ -357,6 +355,7 @@ Used by `createAudit(config)` and `initGlobalAudit(config)`.
 | ---------------- | -------- | -------------------------- | ----------------------------------------------------------------------- |
 | `serviceName`    | Yes      | none                       | Non-empty string; invalid values throw during configuration             |
 | `serviceVersion` | No       | omitted                    | Written to `event.service.version` when provided                        |
+| `instanceId`     | No       | omitted                    | Written to `event.service.instanceId` when provided                     |
 | `environment`    | Yes      | none                       | Must be `development`, `staging`, or `production`; invalid values throw |
 | `transports`     | No       | `[new ConsoleTransport()]` | Every event is sent to each transport in the array                      |
 | `maskedFields`   | No       | no masking                 | Dot-notation payload paths; array indexing is not supported             |

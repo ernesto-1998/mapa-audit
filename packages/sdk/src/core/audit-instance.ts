@@ -25,6 +25,8 @@ export interface AuditConfig {
   serviceName: string;
   /** Optional service version written into event service metadata. */
   serviceVersion?: string;
+  /** Optional service instance identifier written into event service metadata. */
+  instanceId?: string;
   /** Runtime environment for the emitting service. */
   environment: Environment;
   /**
@@ -112,7 +114,10 @@ export function createAudit(config: AuditConfig): AuditInstance {
     ...(config.serviceVersion === undefined
       ? {}
       : { version: config.serviceVersion }),
-    environment: config.environment
+    environment: config.environment,
+    ...(config.instanceId === undefined
+      ? {}
+      : { instanceId: config.instanceId })
   };
   const transports: Transport[] = config.transports ?? [new ConsoleTransport()];
   const payloadOptions: PayloadOptions = {

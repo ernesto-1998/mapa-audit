@@ -148,9 +148,7 @@ configuration, framework adapters provide request/correlation/actor context when
 available, and the developer supplies classification, entity, and payload data.
 
 `AuditEvent.payloadSchemaVersion` is part of the shared transport contract, but
-`RecordInput` does not currently expose a way to set it. Likewise,
-`service.instanceId` exists in `AuditEvent`, but `AuditConfig` does not currently
-configure it.
+`RecordInput` does not currently expose a way to set it.
 
 ### Classification Model
 
@@ -192,6 +190,7 @@ target user.
 | ---------------- | -------- | -------------------------- | ------------------------------------------------------------------------------------------------- |
 | `serviceName`    | Yes      | none                       | Non-empty service name written to `event.service.name`; invalid values throw during configuration |
 | `serviceVersion` | No       | omitted                    | Written to `event.service.version` when provided                                                  |
+| `instanceId`     | No       | omitted                    | Written to `event.service.instanceId` when provided                                               |
 | `environment`    | Yes      | none                       | Must be `development`, `staging`, or `production`; invalid values throw during configuration      |
 | `transports`     | No       | `[new ConsoleTransport()]` | Every event is sent to each transport in the array                                                |
 | `maskedFields`   | No       | no masking                 | Dot-notation payload paths to replace with `"***"`                                                |
@@ -213,6 +212,7 @@ const fileTransport = new FileTransport({
 initGlobalAudit({
   serviceName: 'payments-api',
   serviceVersion: '1.0.0',
+  instanceId: 'payments-api-01',
   environment: 'production',
   transports: [new ConsoleTransport(), fileTransport],
   maskedFields: ['creditCard', 'user.ssn'],
