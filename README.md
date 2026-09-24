@@ -27,21 +27,31 @@ event shape.
 - [Troubleshooting](#troubleshooting)
 - [Executable Examples](#executable-examples)
 - [Project Status and Roadmap](#project-status-and-roadmap)
+- [Release Workflow](#release-workflow)
 
 ## Installation
 
-This repository is currently a private monorepo. The packages have
-`"private": true` and are not published to the public npm registry yet, so public
-`npm install @tnet06/...` commands will not work until publishing metadata is
-finalized.
+Public packages implemented today:
 
-Packages implemented today:
+| Package                                 | Purpose                                                                                    |
+| --------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `@tnet06/mapa-audit-sdk`                | Core SDK, global/creational APIs, Express/Fastify/NestJS adapters, console/file transports |
+| `@tnet06/mapa-audit-types`              | Shared `AuditEvent`, enum unions, and `Transport` contract                                 |
+| `@tnet06/mapa-audit-transport-rabbitmq` | Optional RabbitMQ publisher transport                                                      |
 
-| Package                                 |            Status | Purpose                                                                                    |
-| --------------------------------------- | ----------------: | ------------------------------------------------------------------------------------------ |
-| `@tnet06/mapa-audit-sdk`                | private workspace | Core SDK, global/creational APIs, Express/Fastify/NestJS adapters, console/file transports |
-| `@tnet06/mapa-audit-types`              | private workspace | Shared `AuditEvent`, enum unions, and `Transport` contract                                 |
-| `@tnet06/mapa-audit-transport-rabbitmq` | private workspace | Optional RabbitMQ publisher transport                                                      |
+Install the SDK with only the framework you actually use:
+
+```sh
+npm install @tnet06/mapa-audit-sdk express
+npm install @tnet06/mapa-audit-sdk fastify
+npm install @tnet06/mapa-audit-sdk @nestjs/common
+```
+
+Install the optional RabbitMQ transport separately when needed:
+
+```sh
+npm install @tnet06/mapa-audit-transport-rabbitmq
+```
 
 For local development from this monorepo:
 
@@ -51,21 +61,13 @@ npm run build
 npm test
 ```
 
+The monorepo development and release tooling requires Node.js
+`^22.11.0 || ^24.0.0 || >=26.0.0`. This requirement comes from Changesets 3
+and does not change the published packages' Node.js `>=20` runtime support.
+
 `@tnet06/mapa-audit-types` is a dependency of the SDK and usually does not need
 to be installed manually by application code. Custom transports should import
 `Transport` and `AuditEvent` directly from `@tnet06/mapa-audit-types`.
-
-Once the packages are published, install the SDK with only the framework you
-actually use:
-
-```sh
-npm install @tnet06/mapa-audit-sdk express
-npm install @tnet06/mapa-audit-sdk fastify
-npm install @tnet06/mapa-audit-sdk @nestjs/common
-```
-
-Those commands are examples for the future published package; they do not work
-against the public npm registry while this monorepo remains private.
 
 Express, Fastify, and `@nestjs/common` are optional peer dependencies of the SDK.
 Installing the SDK should not force a consumer app to install all three
@@ -783,9 +785,6 @@ that transport and continues dispatching to the others.
 `@tnet06/mapa-audit-transport-rabbitmq`. It depends on
 `amqp-connection-manager` and `@tnet06/mapa-audit-types`, not on the SDK.
 
-The package is private in this monorepo today. Once published to a public or
-private registry, application projects can add it separately from the base SDK.
-
 ```sh
 npm install @tnet06/mapa-audit-transport-rabbitmq
 ```
@@ -1154,6 +1153,61 @@ For deeper architecture and future pipeline details, see:
 
 Note: some design docs may lag the newest working-tree implementation. The
 README describes the current code in this repository.
+
+## Release Workflow
+
+This repository uses Changesets for package versioning, package changelogs, and
+npm releases. Packages are versioned independently.
+
+Run the release workflow with Node.js `^22.11.0 || ^24.0.0 || >=26.0.0`.
+Published packages continue to support Node.js `>=20` at runtime.
+
+For a public package change, create a changeset:
+
+```sh
+npm run changeset
+```
+
+Before preparing a release, inspect the release plan:
+
+```sh
+npm run changeset:status
+```
+
+Apply package versions and changelog entries:
+
+```sh
+npm run version-packages
+```
+
+Then synchronize the lockfile:
+
+```sh
+npm install
+```
+
+Before publishing, validate formatting, linting, build output, tests, and npm
+package contents:
+
+```sh
+npm run format
+npm run lint
+npm run build -- --force
+npm test
+npm pack --dry-run --workspace @tnet06/mapa-audit-sdk
+```
+
+Publishing is manual for now; there is no GitHub Actions release workflow yet.
+After the versioning changes have been reviewed and committed by the maintainer
+responsible for the release, publish with:
+
+```sh
+npm run release
+```
+
+`npm run release` publishes packages whose versions are not yet present on npm
+and may create tags. Do not run it before reviewing and committing the versioning
+changes.
 
 ## License
 

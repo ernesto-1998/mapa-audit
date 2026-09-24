@@ -13,7 +13,7 @@
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-express": "^11.0.0",
     "@nestjs/platform-fastify": "^11.1.29",
-    "@tnet06/mapa-audit-sdk": "0.1.0",
+    "@tnet06/mapa-audit-sdk": "0.2.0",
     "reflect-metadata": "^0.2.0"
   }
 }
